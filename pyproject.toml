@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coalestra"
-version = "0.1.0"
-description = "Consistent snapshots from prioritized sources with request coalescing, freshness policies and resilient concurrent reads."
+version = "0.2.0"
+description = "Consistent snapshots with batch acquisition, incremental sessions, derived resources, caching, and request coalescing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
   { name = "Igor Souza" }
 ]
-keywords = ["snapshot", "cache", "single-flight", "orchestration", "resilience", "asyncio"]
+keywords = ["snapshot", "cache", "batch", "single-flight", "derived-data", "orchestration", "resilience", "asyncio"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",

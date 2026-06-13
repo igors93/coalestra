@@ -1,82 +1,201 @@
 # Integração com o Alphora
 
-A primeira integração deve substituir aquisições de leitura duplicadas, sem mover regras de trading para a Coalestra.
+A Coalestra deve substituir somente aquisição e composição de leituras. Estratégia, risco, reconciliação decisória e envio de ordens permanecem no Alphora.
 
-## Escopo inicial
+## Modelo recomendado
 
-Use a Coalestra para obter:
+Use uma `SnapshotSession` por ciclo do Governor:
 
-- preço atual;
-- mark price;
-- posição por símbolo;
-- ordens normais abertas;
-- ordens algorítmicas abertas;
-- informações da conta;
-- regras da exchange.
+```text
+ciclo do Governor
+    |
+    +-- estágio base
+    |     conta, posições e mercado leve
+    |
+    +-- seleção
+    |     posições abertas, scheduler, dirty e fast lane
+    |
+    +-- estágio pesado
+          mark price, ordens e regras somente para símbolos selecionados
+```
 
-Não mova para a biblioteca:
-
-- score da estratégia;
-- decisão de entrada ou saída;
-- portfolio risk;
-- pre-execution guard;
-- criação e envio de ordens;
-- decisão de reconciliação de estado.
+A sessão garante o mesmo `snapshot_id`, deadline e valores já adquiridos nos dois estágios.
 
 ## Vocabulário sugerido
 
 ```python
-PRICE = lambda symbol: ResourceKey("market", "price", symbol)
-MARK_PRICE = lambda symbol: ResourceKey("market", "mark_price", symbol)
-POSITION = lambda symbol: ResourceKey("account", "position", symbol)
-OPEN_ORDERS = lambda symbol: ResourceKey("orders", "open", symbol)
-OPEN_ALGO_ORDERS = lambda symbol: ResourceKey("orders", "open_algo", symbol)
-EXCHANGE_RULES = lambda symbol: ResourceKey("exchange", "rules", symbol)
+from coalestra import ResourceKey
+
 ACCOUNT = ResourceKey("account", "summary")
+ALL_POSITIONS = ResourceKey("account", "positions")
+EXCHANGE_INFO = ResourceKey("exchange", "info")
+
+
+def market_state(symbol: str) -> ResourceKey:
+    return ResourceKey("market", "state", symbol)
+
+
+def mark_price(symbol: str) -> ResourceKey:
+    return ResourceKey("market", "mark-price", symbol)
+
+
+def position(symbol: str) -> ResourceKey:
+    return ResourceKey("account", "position", symbol)
+
+
+def open_orders(symbol: str) -> ResourceKey:
+    return ResourceKey("orders", "open", symbol)
+
+
+def open_algo_orders(symbol: str) -> ResourceKey:
+    return ResourceKey("orders", "open-algo", symbol)
+
+
+def exchange_rules(symbol: str) -> ResourceKey:
+    return ResourceKey("exchange", "rules", symbol)
 ```
 
-## Prioridade das fontes
+## Fontes em lote
+
+Use `BatchSnapshotSource` quando uma única leitura consegue atender várias chaves:
+
+- leitura de vários preços mantidos pelo `MarketDataHub`;
+- endpoint que devolve mark prices de todos os símbolos;
+- consulta de todas as posições;
+- consulta de ordens para vários símbolos;
+- leitura de um cache compartilhado com várias entradas.
+
+Uma fonte em lote pode retornar apenas parte das chaves. As ausentes seguem automaticamente para a próxima fonte, normalmente REST.
+
+## Recursos derivados
+
+Dois recursos importantes não devem gerar chamadas externas por símbolo:
 
 ```text
-100: MarketDataHub / UserDataStream auditado
- 50: cache operacional local validado
- 10: Binance REST
+ALL_POSITIONS
+    +-- POSITION(BTCUSDT)
+    +-- POSITION(ETHUSDT)
+    +-- POSITION(SOLUSDT)
+
+EXCHANGE_INFO
+    +-- EXCHANGE_RULES(BTCUSDT)
+    +-- EXCHANGE_RULES(ETHUSDT)
+    +-- EXCHANGE_RULES(SOLUSDT)
 ```
 
-Fontes de stream devem informar o horário real do evento em `observed_at`. Se o valor estiver fora do TTL, a Coalestra continua automaticamente para a próxima fonte.
-
-## Uso no ciclo do Governor
-
-No início do ciclo:
-
-1. Determine símbolos vencidos, em fast lane e com posição aberta.
-2. Monte o conjunto de recursos necessários.
-3. Construa um único snapshot.
-4. Coloque esse snapshot no `CycleContext`.
-5. Faça light e heavy evaluation lerem do mesmo snapshot.
-6. Mantenha portfolio risk final, pre-execution guard e execução serializados no Alphora.
+Exemplo de regras derivadas:
 
 ```python
-snapshot = provider.build(
-    cycle_resource_keys,
-    strict=False,
-    deadline_seconds=3.0,
-    metadata={"cycle_id": cycle_id},
-)
+from coalestra import CallableDerivedSource
 
-cycle_context.operational_snapshot = snapshot
+rules_source = CallableDerivedSource(
+    name="alphora-symbol-rules",
+    priority=100,
+    supports=lambda key: key.namespace == "exchange" and key.name == "rules",
+    dependencies=lambda _key: (EXCHANGE_INFO,),
+    deriver=lambda key, snapshot, _context: extract_symbol_rules(
+        snapshot.value(EXCHANGE_INFO, dict),
+        key.subject,
+    ),
+)
 ```
 
-Crie o `SyncSnapshotBuilder` uma vez no startup e feche-o no shutdown. Não crie uma nova fachada a cada ciclo, pois isso descartaria o estado de cache e resiliência.
+Exemplo de posição derivada:
 
-## Migração segura
+```python
+position_source = CallableDerivedSource(
+    name="alphora-position-view",
+    priority=100,
+    supports=lambda key: key.namespace == "account" and key.name == "position",
+    dependencies=lambda _key: (ALL_POSITIONS,),
+    deriver=lambda key, snapshot, _context: extract_position(
+        snapshot.value(ALL_POSITIONS, list),
+        key.subject,
+    ),
+)
+```
 
-1. **Shadow:** construa o snapshot e compare com o caminho atual.
-2. **Adoção read-only:** use o snapshot para preços e regras da exchange.
-3. **Dados privados:** adote posição e ordens do User Data Stream auditado, mantendo fallback REST.
-4. **Consolidação:** remova caches duplicados do Governor, Router e ExecutionEngine.
-5. **Medição:** acompanhe chamadas REST por ciclo, cache hit, stale fallback e latência p50/p95.
+## Ciclo incremental
 
-## Regra de segurança
+```python
+with coalestra_provider.session(
+    snapshot_id=cycle_id,
+    deadline_seconds=3.0,
+    metadata={"cycle_id": cycle_id},
+) as session:
+    baseline_keys = [ACCOUNT, ALL_POSITIONS]
+    baseline_keys.extend(market_state(symbol) for symbol in configured_symbols)
+    baseline = session.resolve(baseline_keys, strict=False)
 
-A presença de um valor no snapshot não significa que ele esteja autorizado para execução. O Alphora deve continuar validando freshness, estado reconciliado, risco e payload final antes de qualquer mutação.
+    open_symbols = find_open_symbols(baseline.value(ALL_POSITIONS, list))
+    selected_symbols = rank_due_symbols(open_symbols, dirty_symbols, fast_lane_symbols)
+
+    heavy_keys = [EXCHANGE_INFO]
+    for symbol in selected_symbols:
+        heavy_keys.extend(
+            [
+                mark_price(symbol),
+                position(symbol),
+                open_orders(symbol),
+                open_algo_orders(symbol),
+                exchange_rules(symbol),
+            ]
+        )
+
+    operational_snapshot = session.resolve(heavy_keys, strict=False)
+    cycle_context.operational_snapshot = operational_snapshot
+```
+
+## Pontos de integração
+
+### Startup
+
+Crie um único `SyncSnapshotBuilder` junto com `MarketDataHub`, `UserDataStreamHub` e o cliente Binance. Não recrie o provider a cada ciclo.
+
+### `CycleContext`
+
+Adicione:
+
+```python
+operational_snapshot: Snapshot | None = None
+```
+
+### Avaliação leve
+
+Leia `market_state(symbol)` da sessão em vez de pedir novo snapshot ao `MarketDataRouter`.
+
+### Avaliação pesada
+
+Mapeie as chaves da Coalestra para o `HeavyMarketSnapshot`. Não faça novas leituras dentro do mapper.
+
+### Consolidação
+
+Depois da comparação shadow:
+
+1. remover cache de conta do `MarketDataRouter`;
+2. remover cache de exchange info do `MarketDataRouter`;
+3. remover cache duplicado de exchange info do `ExecutionEngine`;
+4. remover consultas individuais de posição usadas somente para montar a visão do ciclo;
+5. manter escrita, risco e execução serializados no Alphora.
+
+## Migração
+
+1. **Shadow:** construir a sessão e comparar com o caminho atual.
+2. **Mercado e regras:** adotar market state e exchange rules derivadas.
+3. **Posições:** adotar `ALL_POSITIONS` e posições derivadas.
+4. **Ordens e conta:** adotar fontes de stream/cache com REST como fallback.
+5. **Remoção:** retirar caches e aquisições duplicadas do Alphora.
+
+## Métricas mínimas
+
+- chamadas individuais por ciclo;
+- chamadas em lote por ciclo;
+- tamanho médio dos lotes;
+- recursos derivados;
+- dependências compartilhadas;
+- cache hits;
+- single-flight joins;
+- stale fallbacks;
+- duração do estágio base;
+- duração do estágio pesado;
+- duração total da sessão.

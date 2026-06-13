@@ -1,5 +1,5 @@
 from coalestra.orchestration.builder import SnapshotBuilder
-from coalestra.orchestration.policy import FreshnessResolver, PolicyResolver
-from coalestra.orchestration.singleflight import SingleFlight
+from coalestra.orchestration.policy import PolicyResolver
+from coalestra.orchestration.session import SnapshotSession
 
-__all__ = ["FreshnessResolver", "PolicyResolver", "SingleFlight", "SnapshotBuilder"]
+__all__ = ["PolicyResolver", "SnapshotBuilder", "SnapshotSession"]

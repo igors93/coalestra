@@ -2,199 +2,190 @@
 
 **Coalestra** is a dependency-free Python library for building consistent operational snapshots from multiple read-only data sources.
 
-It helps applications that repeatedly request the same information from event streams, local caches, databases and remote APIs. Coalestra reduces duplicate calls, hides independent I/O latency through bounded concurrency and returns one immutable view of the data used by a unit of work.
+It reduces duplicate calls, hides independent I/O latency through bounded concurrency, combines batch and single-resource sources, and can derive application resources from already acquired data. The core is domain-agnostic: it does not know about trading, Binance, Alphora, HTTP, SQL, Redis, or any application model.
 
-The library is domain-agnostic. It does not know about trading, Binance, Alphora, HTTP, SQL or any application model.
-
-> Em português: a Coalestra reúne leituras de várias fontes em um snapshot único, consistente e rastreável. Ela foi criada pensando no Alphora, mas o núcleo não depende dele e pode ser usado por qualquer sistema.
-
-## What it provides
+## Capabilities
 
 - Immutable snapshots with provenance and freshness metadata.
+- Single-stage builds and incremental multi-stage `SnapshotSession` workflows.
 - Concurrent acquisition of independent resources.
-- Single-flight request coalescing for identical resources.
-- Priority-based source selection and safe fallback.
+- Per-key single-flight coalescing across overlapping requests.
+- Batch sources that resolve many resources with one operation.
+- Derived resources with dependency chains and cycle detection.
+- Priority-based fallback across single, batch, and derived sources.
 - Per-resource TTL and maximum-staleness policies.
 - Fresh cache reuse and optional stale-on-error behavior.
-- Bounded retries, source timeouts and per-source circuit breakers.
-- Replaceable cache, clock, event and metrics interfaces.
-- Async API plus a persistent synchronous facade.
+- Bounded retries, source timeouts, snapshot deadlines, and circuit breakers.
+- Replaceable cache, clock, event, and metrics interfaces.
+- Async API plus persistent synchronous facades.
 - Strict static typing and no runtime dependencies.
 
-## Non-goals
-
-Coalestra deliberately does **not** provide:
-
-- business decisions;
-- write or mutation orchestration;
-- distributed transactions;
-- domain validation;
-- authorization or risk decisions.
-
-A trading application may use Coalestra to read prices, positions, orders, balances and exchange rules. It must keep trading decisions and order submission outside the library.
-
-## Requirements
-
-- Python 3.10+
-
-## Install for development
+## Installation
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-```
-
-## Minimal async example
+## Single-resource source
 
 ```python
 import asyncio
 
-from coalestra import (
-    CallableSource,
-    FreshnessPolicy,
-    ResourceKey,
-    SnapshotBuilder,
-    SourcePayload,
-)
+from coalestra import CallableSource, ResourceKey, SnapshotBuilder
 
 PRICE = ResourceKey("market", "price", "BTCUSDT")
 
+builder = SnapshotBuilder(
+    [
+        CallableSource(
+            name="rest",
+            priority=10,
+            supports=lambda key: key == PRICE,
+            fetcher=lambda _key, _context: {"price": "65000.00"},
+        )
+    ]
+)
 
-async def stream_fetch(key, context):
-    return SourcePayload(
-        value={"price": "65000.00"},
-        observed_at=context.requested_at,
-        metadata={"transport": "websocket"},
-    )
-
-
-async def rest_fetch(key, context):
-    return {"price": "65001.00"}
-
-
-async def main() -> None:
-    builder = SnapshotBuilder(
-        sources=[
-            CallableSource(
-                name="stream",
-                priority=100,
-                supports=lambda key: key.namespace == "market",
-                fetcher=stream_fetch,
-                timeout_seconds=0.2,
-            ),
-            CallableSource(
-                name="rest",
-                priority=10,
-                supports=lambda key: key.namespace == "market",
-                fetcher=rest_fetch,
-                timeout_seconds=2.0,
-            ),
-        ],
-        default_policy=FreshnessPolicy(
-            ttl_seconds=1.0,
-            max_stale_seconds=5.0,
-        ),
-        max_concurrency=8,
-    )
-
-    snapshot = await builder.build([PRICE], deadline_seconds=2.0)
-    price = snapshot[PRICE]
-
-    print(price.value)
-    print(price.source)
-    print(price.age_seconds)
-    print(price.from_cache)
-
-
-asyncio.run(main())
+snapshot = asyncio.run(builder.build([PRICE]))
+print(snapshot.value(PRICE, dict))
 ```
+
+## Batch acquisition
+
+A batch source receives every unresolved compatible key available at its priority level. It may return a partial mapping; omitted resources automatically continue through lower-priority sources.
+
+```python
+from coalestra import CallableBatchSource, ResourceKey, SnapshotBuilder
+
+
+def price(symbol: str) -> ResourceKey:
+    return ResourceKey("market", "price", symbol)
+
+
+async def fetch_prices(keys, _context):
+    symbols = [key.subject for key in keys]
+    response = await remote_api.fetch_prices(symbols)
+    return {key: response[key.subject] for key in keys if key.subject in response}
+
+
+builder = SnapshotBuilder(
+    [
+        CallableBatchSource(
+            name="price-api",
+            priority=100,
+            supports=lambda key: key.namespace == "market" and key.name == "price",
+            fetcher=fetch_prices,
+        )
+    ]
+)
+```
+
+Custom integrations may implement the `BatchSnapshotSource` protocol directly.
+
+## Incremental snapshot sessions
+
+A session keeps one identity, creation time, deadline, concurrency budget, and internal acquisition memo across multiple stages. Values resolved in an earlier stage are pinned for the rest of the session.
+
+```python
+async with builder.session(
+    snapshot_id="cycle-42",
+    deadline_seconds=3.0,
+    metadata={"tenant": "example"},
+) as session:
+    baseline = await session.resolve(baseline_keys, strict=False)
+
+    selected = choose_resources_from(baseline)
+    final = await session.resolve(selected, strict=False)
+```
+
+A failed key is retained by the session. It can be attempted again explicitly:
+
+```python
+await session.resolve([KEY], retry_errors=True)
+```
+
+## Derived resources
+
+Derived sources declare dependencies and compute a resource from an immutable dependency snapshot. Dependencies may themselves be cached, batched, fetched, or derived.
+
+```python
+from coalestra import CallableDerivedSource, ResourceKey
+
+EXCHANGE_INFO = ResourceKey("exchange", "info")
+
+
+def rules(symbol: str) -> ResourceKey:
+    return ResourceKey("exchange", "rules", symbol)
+
+
+def derive_rules(key, dependencies, _context):
+    exchange_info = dependencies.value(EXCHANGE_INFO, dict)
+    return extract_rules(exchange_info, key.subject)
+
+
+rules_source = CallableDerivedSource(
+    name="symbol-rules",
+    priority=100,
+    supports=lambda key: key.namespace == "exchange" and key.name == "rules",
+    dependencies=lambda _key: (EXCHANGE_INFO,),
+    deriver=derive_rules,
+)
+```
+
+Coalestra detects direct and indirect dependency cycles and allows lower-priority sources to act as fallbacks when a derivation cannot be completed.
 
 ## Synchronous applications
 
-`SyncSnapshotBuilder` owns one dedicated event-loop thread. Keeping that facade alive preserves cache, circuit-breaker and single-flight state across application cycles.
+`SyncSnapshotBuilder` owns a dedicated event-loop thread. Keep it alive for the lifetime of the application so cache, circuits, and single-flight state survive across calls.
 
 ```python
 from coalestra import SyncSnapshotBuilder
 
 with SyncSnapshotBuilder(builder) as sync_builder:
-    snapshot = sync_builder.build([PRICE], deadline_seconds=2.0)
+    snapshot = sync_builder.build([PRICE])
+
+    with sync_builder.session(snapshot_id="cycle-42") as session:
+        session.resolve(baseline_keys, strict=False)
+        final = session.resolve(selected_keys, strict=False)
 ```
 
-Synchronous source functions are executed in worker threads by `CallableSource`, so they do not block Coalestra's event loop. A timed-out Python thread cannot be forcibly stopped; source implementations should still configure transport-level timeouts.
-
-## Resource identity
-
-Applications define their own vocabulary using stable keys:
-
-```python
-ResourceKey(namespace="account", name="balance")
-ResourceKey(namespace="market", name="price", subject="BTCUSDT")
-ResourceKey(namespace="orders", name="open", subject="ETHUSDT")
-```
-
-Keys are normalized and hashable, making them safe for caching and coalescing.
+Synchronous source, batch, and derivation callables are executed in worker threads. Transport-level timeouts are still necessary because Python cannot forcibly terminate an already-running thread.
 
 ## Source priority and fallback
 
-Higher numeric priority is attempted first. A typical order is:
+All source types share one descending-priority chain:
 
-1. In-process event-stream state.
-2. Distributed or local cache.
-3. Authoritative remote API.
+1. Derived source, batch source, or single source at the highest priority.
+2. Remaining unresolved resources proceed to the next compatible source.
+3. The newest acceptable stale value is used only when policy permits and no fresh source succeeds.
 
-A source exposes a stable name, a priority, a `supports()` predicate and a `fetch()` operation. `CallableSource` adapts normal functions and coroutines; advanced integrations can implement the `SnapshotSource` protocol directly.
+If a class exposes more than one source capability, Coalestra selects derived first, then batch, then single-resource acquisition.
 
-## Freshness semantics
+## Freshness
 
-Each resource receives a `FreshnessPolicy`:
+Every resource uses a `FreshnessPolicy`:
 
 - `ttl_seconds`: maximum age considered fresh;
-- `max_stale_seconds`: maximum age accepted as emergency fallback;
-- `allow_stale_on_error`: whether acceptable stale data may be returned after fresh sources fail.
+- `max_stale_seconds`: maximum age accepted as an emergency fallback;
+- `allow_stale_on_error`: whether stale data may be returned when fresh resolution fails.
 
-Each resolved value includes:
+Every resolved value contains its source, observation time, fetch time, age, stale flag, cache flag, latency, attempts, and metadata.
 
-```python
-SnapshotValue(
-    key=...,
-    value=...,
-    source="user-stream",
-    observed_at=...,
-    fetched_at=...,
-    age_seconds=0.4,
-    stale=False,
-    from_cache=False,
-    latency_ms=2.7,
-    attempts=1,
-    metadata={...},
-)
-```
+## Architectural boundary
+
+Coalestra owns read acquisition, caching, freshness, coalescing, fallback, derivation, and read concurrency. The consuming application owns business decisions, authorization, risk, writes, transactions, and domain validation.
 
 ## Project layout
 
 ```text
-coalestra/
-├── src/coalestra/
-│   ├── adapters/         # Integration helpers
-│   ├── cache/            # Cache implementations
-│   ├── core/             # Models, protocols and errors
-│   ├── observability/    # Event and metrics sinks
-│   ├── orchestration/    # Builder, policies and single-flight
-│   ├── resilience/       # Retry and circuit breaker
-│   └── sync.py           # Persistent synchronous facade
-├── tests/                # Contract and concurrency tests
-├── examples/             # Generic and Alphora examples
-├── benchmarks/           # Synthetic regression harness
-└── docs/                 # Architecture and integration guides
+src/coalestra/
+├── adapters/         # Callable single, batch, and derived sources
+├── cache/            # Cache implementations
+├── core/             # Models, protocols, and errors
+├── observability/    # Event and metrics sinks
+├── orchestration/    # Builder, session, policy, and single-flight
+├── resilience/       # Retry and circuit breaker
+└── sync.py           # Persistent synchronous builder and session
 ```
 
 ## Quality pipeline
@@ -203,22 +194,13 @@ coalestra/
 make quality
 ```
 
-This runs formatting, linting, strict mypy, tests and package build. The same checks run in GitHub Actions for Python 3.10, 3.11 and 3.12.
-
-## Benchmark harness
-
-```bash
-PYTHONPATH=src python benchmarks/benchmark_snapshot.py
-```
-
-The benchmark compares serial acquisition with bounded concurrent snapshot construction. It is a regression harness, not a production performance claim.
+This runs formatting, linting, strict mypy, tests, and package build.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Public API](docs/public-api.md)
 - [Integração com o Alphora](docs/alphora-integration.pt-BR.md)
-- [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)
 
 ## License

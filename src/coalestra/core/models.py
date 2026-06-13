@@ -56,6 +56,7 @@ class FetchContext:
     deadline_at: float | None = None
     deadline_monotonic: float | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    snapshot_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))

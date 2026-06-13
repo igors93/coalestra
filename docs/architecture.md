@@ -1,114 +1,118 @@
 # Architecture
 
-## Design goal
+## Goal
 
-Coalestra creates one immutable read model for one unit of work. It centralizes acquisition concerns without taking ownership of application decisions or mutations.
+Coalestra creates one immutable read model for one unit of work while keeping transport and domain concerns outside the core.
 
-## Dependency direction
+## Source model
 
-```text
-consumer application
-        |
-        v
-application adapters / SnapshotSource implementations
-        |
-        v
-SnapshotBuilder
-  |          |            |
-  v          v            v
-AsyncCache  SingleFlight  resilience
-        \       |       /
-         v      v      v
-        core models and protocols
-```
-
-The core imports no transport, framework or application integration.
-
-## Main components
-
-### `ResourceKey`
-
-Stable identity used by caching, policy resolution and request coalescing. The consuming application owns the key vocabulary.
+Every source exposes a name, priority, optional timeout, and `supports(ResourceKey)` predicate. Three acquisition contracts can coexist in one builder:
 
 ### `SnapshotSource`
 
-Read-only source protocol. Sources declare support for a key and return a `SourcePayload` containing the value, its observation timestamp and optional metadata.
+Resolves one key through `fetch(key, context)`.
 
-### `SnapshotBuilder`
+### `BatchSnapshotSource`
 
-Coordinates cache lookup, source fallback, bounded concurrency, deadlines, retries, circuit breakers and snapshot assembly.
+Resolves a collection through `fetch_many(keys, context)`. Partial results are valid. Missing keys continue through lower-priority sources.
 
-### `AsyncCache`
+### `DerivedSource`
 
-Replaceable asynchronous cache contract. The included `AsyncMemoryCache` is a concurrency-safe optional LRU implementation. Redis or another shared cache can be implemented externally without changing builder semantics.
+Declares `dependencies(key)` and computes the requested value through `derive(key, dependency_snapshot, context)`.
 
-### `SingleFlight`
+Capability selection is deterministic: derived, then batch, then single. Normal applications should expose one capability per source object.
 
-Maintains at most one in-flight acquisition per resource key in a builder instance. Additional callers join the same future. Cancelling one waiter does not cancel the shared acquisition.
+## Resolution pipeline
 
-### `PolicyResolver`
+For a set of requested keys, the builder:
 
-Resolves freshness policy through exact overrides, a dynamic resolver or a default policy.
+1. Reuses values pinned in the current session runtime.
+2. Resolves freshness policy and checks the cache.
+3. Reserves unresolved keys independently in `SingleFlight`.
+4. Gives the first caller ownership of newly reserved keys.
+5. Walks compatible sources in descending priority.
+6. Groups all unresolved compatible keys for a batch source.
+7. Resolves declared dependencies recursively for a derived source.
+8. Applies timeout, retry, and circuit-breaker rules.
+9. Accepts fresh values and caches them.
+10. Keeps the newest acceptable stale candidate while trying lower sources.
+11. Returns stale only when policy allows and fresh resolution failed.
+12. Returns immutable values and errors to the caller.
 
-### `SyncSnapshotBuilder`
+## Per-key single-flight with batches
 
-Long-lived bridge for synchronous systems. It owns a dedicated event loop so cache, circuits and in-flight coordination survive across calls.
+Batching and coalescing operate together. `SingleFlight.run_many()` reserves each key independently:
 
-## Snapshot construction
+```text
+request 1: A B
+request 2:   B C
 
-For each resource key, the builder:
+owner batch 1: A B
+owner batch 2:     C
+joined key:        B
+```
 
-1. Resolves the freshness policy.
-2. Returns a fresh cache entry when available.
-3. Joins an existing in-flight acquisition for the same key when present.
-4. Finds compatible sources and orders them by descending priority.
-5. Checks the source circuit breaker.
-6. Applies the smaller of source timeout and remaining snapshot deadline.
-7. Runs bounded retries for transient failures.
-8. Rejects values older than the fresh TTL and keeps the newest acceptable stale candidate.
-9. Returns the first fresh value and caches it.
-10. Uses acceptable stale data only when allowed and fresh resolution did not succeed.
-11. Produces an immutable snapshot or an aggregate strict-mode error.
+This prevents duplicate work for overlapping requests without requiring identical key sets.
+
+A cancelled waiter does not cancel shared producer work.
+
+## Snapshot sessions
+
+`SnapshotSession` supports workflows where later resource requirements depend on earlier results.
+
+A session owns:
+
+- one `snapshot_id`;
+- one wall-clock creation timestamp;
+- one monotonic deadline;
+- one concurrency semaphore;
+- an internal memo of values acquired directly or as dependencies;
+- explicit resources and errors requested by the consumer.
+
+Successful values are pinned for the session, even if their cache TTL expires between stages. Dependency resources remain internal until explicitly requested, preserving the public snapshot contract.
+
+`retry_errors=True` allows explicitly requested failed keys to be attempted again without changing session identity or deadline.
+
+## Derived resource graph
+
+A derived source receives an immutable snapshot containing its dependencies. Dependencies can be resolved by any source type and can form multi-level chains.
+
+Coalestra tracks the ancestry path of each derivation. A direct or indirect cycle produces `DependencyCycleError`; the failed derived source is then treated like any other failed source, allowing lower-priority fallback.
+
+Example:
+
+```text
+symbol rules(BTC)
+        |
+        v
+exchange info ---- remote API
+```
+
+Several derived keys that depend on the same base key share one acquisition through memoization and single-flight.
 
 ## Consistency model
 
-Coalestra provides **acquisition consistency**, not a distributed transaction. Every resource records its own `observed_at`, source and age. Consumers can enforce stronger domain rules after snapshot construction.
+Coalestra provides acquisition consistency, not a distributed transaction. Resources may have different `observed_at` timestamps because independent reads occur concurrently. Consumers may inspect age and provenance and apply stronger domain rules.
 
-A snapshot is immutable, but resources may have slightly different observation times because independent reads happen concurrently.
+## Concurrency and deadlines
 
-## Concurrency model
+Each build creates one session internally. A session has one semaphore shared by all stages and recursive dependency resolution. Batch operations consume one concurrency slot, independent single-resource calls consume one slot each, and derivation execution consumes one slot after dependencies are available.
 
-Different resource keys resolve concurrently up to `max_concurrency`. Identical keys are coalesced.
+The deadline is created once per build or session. Timeout calculations use a monotonic clock.
 
-Only reads are parallelized. Coalestra intentionally provides no write orchestration API.
+## Cache model
 
-Synchronous callables run through `asyncio.to_thread`. Transport-level timeouts remain necessary because Python cannot forcibly terminate an already-running worker thread.
-
-## Deadline model
-
-The public context exposes a wall-clock deadline for adapters. Internally, timeout calculations use a monotonic clock so wall-clock adjustments do not extend or shorten a build unexpectedly.
-
-## Resilience model
-
-- Retry is bounded and only applied to transient exception classes.
-- Circuit breakers are isolated per source name.
-- Stale fallback is controlled per resource.
-- Strict mode raises one `SnapshotBuildError` containing all unresolved keys.
-- Non-strict mode returns partial resources plus an immutable error mapping.
-
-## Observability
-
-Event and metrics sinks are replaceable protocols. The default sinks are no-ops. Custom sinks should be fast and non-blocking because they execute in the acquisition path.
-
-Coalestra does not emit resource values by default. Applications remain responsible for sanitizing custom metadata and exception messages.
+The cache stores both acquired and derived `SnapshotValue` instances. A session additionally pins successful values in an internal memo to avoid re-reading or recomputing them in later stages.
 
 ## Extension points
 
 - `SnapshotSource`
+- `BatchSnapshotSource`
+- `DerivedSource`
 - `AsyncCache`
 - `Clock`
 - `EventSink`
 - `MetricsSink`
 - `PolicyResolver`
 
-New transports and application adapters should remain outside the core package.
+Transport and application adapters should remain outside the core package.

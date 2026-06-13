@@ -1,12 +1,12 @@
 # Public API
 
-The stable first-release surface is exported from `coalestra`.
+The public surface is exported from `coalestra`.
 
-## Construction
+## Builders
 
 ### `SnapshotBuilder`
 
-Asynchronous orchestrator. Create one long-lived instance per acquisition domain so its cache, circuit breakers and single-flight registry can be reused.
+Create one long-lived builder per acquisition domain.
 
 ```python
 builder = SnapshotBuilder(
@@ -23,51 +23,77 @@ snapshot = await builder.build(
 )
 ```
 
-### `SyncSnapshotBuilder`
+### `SnapshotSession`
 
-Persistent synchronous facade. Close it during application shutdown or use it as a context manager.
+Created with `builder.session(...)`. Supports incremental `resolve()` calls, one deadline, and pinned values.
 
-## Models
+```python
+async with builder.session(deadline_seconds=3.0) as session:
+    await session.resolve(first_stage, strict=False)
+    final = await session.resolve(second_stage, strict=False)
+```
 
-### `ResourceKey`
+Methods and properties:
 
-Hashable resource identity: `namespace`, `name`, optional `subject`.
+- `resolve(keys, strict=True, retry_errors=False) -> Snapshot`
+- `snapshot() -> Snapshot`
+- `close()`
+- `snapshot_id`
+- `created_at`
+- `context`
+- `closed`
 
-### `FreshnessPolicy`
+### `SyncSnapshotBuilder` and `SyncSnapshotSession`
 
-Fresh TTL, maximum stale window and stale-on-error permission.
+Persistent synchronous facades with equivalent build and session operations.
 
-### `SourcePayload[T]`
-
-Source-returned value with optional observation time and metadata.
-
-### `SnapshotValue[T]`
-
-Resolved value plus provenance and timing information.
-
-### `Snapshot`
-
-Immutable mapping from `ResourceKey` to `SnapshotValue`. In non-strict mode, unresolved keys are available in `snapshot.errors`.
-
-## Sources
-
-### `CallableSource`
-
-Adapter for synchronous or asynchronous functions.
+## Source protocols
 
 ### `SnapshotSource`
 
-Protocol for custom source classes.
+```python
+async def fetch(key, context) -> SourcePayload
+```
+
+### `BatchSnapshotSource`
+
+```python
+async def fetch_many(keys, context) -> Mapping[ResourceKey, SourcePayload]
+```
+
+A partial mapping is valid. Extra unrequested keys are a protocol error.
+
+### `DerivedSource`
+
+```python
+def dependencies(key) -> Collection[ResourceKey]
+async def derive(key, dependencies: Snapshot, context) -> SourcePayload
+```
+
+## Callable adapters
+
+- `CallableSource`
+- `CallableBatchSource`
+- `CallableDerivedSource`
+
+Each accepts synchronous or asynchronous callables. Synchronous functions run in worker threads.
+
+## Models
+
+- `ResourceKey`
+- `FreshnessPolicy`
+- `FetchContext`
+- `SourcePayload[T]`
+- `SnapshotValue[T]`
+- `Snapshot`
+- `CacheLookup`
+
+`FetchContext.snapshot_id` identifies the enclosing build or session.
 
 ## Cache
 
-### `AsyncMemoryCache`
-
-Concurrency-safe in-memory cache with optional LRU bound.
-
-### `AsyncCache`
-
-Protocol for external cache implementations.
+- `AsyncMemoryCache`
+- `AsyncCache`
 
 ## Resilience
 
@@ -87,6 +113,10 @@ Protocol for external cache implementations.
 - `CoalestraError`
 - `SourceUnavailableError`
 - `SourceTimeoutError`
+- `SourceProtocolError`
 - `CircuitOpenError`
+- `DependencyCycleError`
+- `DependencyResolutionError`
 - `ResourceResolutionError`
 - `SnapshotBuildError`
+- `SessionClosedError`

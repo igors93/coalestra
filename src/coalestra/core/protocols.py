@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from collections.abc import Collection, Mapping
+from typing import Any, Protocol, runtime_checkable
 
 from coalestra.core.models import (
     CacheLookup,
     FetchContext,
     FreshnessPolicy,
     ResourceKey,
+    Snapshot,
     SnapshotValue,
     SourcePayload,
 )
@@ -18,8 +20,9 @@ class Clock(Protocol):
     def monotonic(self) -> float: ...
 
 
-class SnapshotSource(Protocol):
-    """Read-only source capable of resolving selected resource keys."""
+@runtime_checkable
+class SourceBase(Protocol):
+    """Common metadata exposed by every Coalestra source."""
 
     name: str
     priority: int
@@ -27,7 +30,44 @@ class SnapshotSource(Protocol):
 
     def supports(self, key: ResourceKey) -> bool: ...
 
+
+@runtime_checkable
+class SnapshotSource(SourceBase, Protocol):
+    """Read-only source capable of resolving one resource at a time."""
+
     async def fetch(self, key: ResourceKey, context: FetchContext) -> SourcePayload[Any]: ...
+
+
+@runtime_checkable
+class BatchSnapshotSource(SourceBase, Protocol):
+    """Source capable of resolving several resources with one operation.
+
+    A successful call may return a partial mapping. Missing resources remain unresolved and are
+    offered to lower-priority sources by the builder.
+    """
+
+    async def fetch_many(
+        self,
+        keys: Collection[ResourceKey],
+        context: FetchContext,
+    ) -> Mapping[ResourceKey, SourcePayload[Any]]: ...
+
+
+@runtime_checkable
+class DerivedSource(SourceBase, Protocol):
+    """Source that computes a resource from other Coalestra resources."""
+
+    def dependencies(self, key: ResourceKey) -> Collection[ResourceKey]: ...
+
+    async def derive(
+        self,
+        key: ResourceKey,
+        dependencies: Snapshot,
+        context: FetchContext,
+    ) -> SourcePayload[Any]: ...
+
+
+Source = SnapshotSource | BatchSnapshotSource | DerivedSource
 
 
 class AsyncCache(Protocol):
