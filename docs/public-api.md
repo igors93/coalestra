@@ -225,3 +225,103 @@ Additional event types include:
 - `ResourceResolutionError`
 - `SnapshotBuildError`
 - `SessionClosedError`
+
+## Resource identity in 0.4
+
+### `ResourceKey`
+
+```python
+ResourceKey(
+    namespace,
+    name,
+    subject="",
+    qualifiers=None,
+    *,
+    normalizer=None,
+)
+```
+
+The default normalizer preserves case and strips surrounding whitespace. Public normalizers:
+
+- `PRESERVE_KEY_NORMALIZER`
+- `LEGACY_KEY_NORMALIZER`
+- `CASE_INSENSITIVE_KEY_NORMALIZER`
+- `KeyNormalizer`
+
+Helpers:
+
+- `ResourceKey.legacy(...)`
+- `normalized(normalizer)`
+- `qualifier(name, default=None)`
+- `with_qualifiers(...)`
+- `without_qualifiers(...)`
+
+## Cache additions in 0.4
+
+### `BatchAsyncCache`
+
+Optional capability detected by `SnapshotBuilder`:
+
+- `get_many(keys, *, now, policies)`
+- `set_many(values)`
+- `invalidate_many(keys)`
+
+### `AsyncMemoryCache`
+
+Additional methods:
+
+- `get_many(...)`
+- `set_many(...)`
+- `invalidate_many(...)`
+- `invalidate_matching(predicate)`
+- `invalidate_namespace(namespace, *, name=None, subject=None)`
+- `prune(*, now, policy_resolver)`
+- `stats() -> CacheStats`
+
+The default maximum size is 10,000 entries. `None` keeps it unbounded.
+
+### Refresh
+
+- `RefreshMode.BLOCKING`
+- `RefreshMode.STALE_WHILE_REVALIDATE`
+- `RefreshMode.REFRESH_AHEAD`
+
+`FreshnessPolicy` additionally accepts `refresh_mode` and `refresh_ahead_seconds`.
+
+`SnapshotBuilder` additions:
+
+- `wait_for_refreshes()`
+- `aclose(cancel_refreshes=False)`
+- asynchronous context-manager support
+
+`SyncSnapshotBuilder` additionally exposes `wait_for_refreshes()` and waits for pending refreshes on close.
+
+## Snapshot diagnostics
+
+`Snapshot.diagnostics` is a `SnapshotDiagnostics` instance containing:
+
+- duration and observation skew;
+- request/result counts;
+- cache hit/miss and batch-operation counts;
+- stale and coalesced counts;
+- source, batch, derived and refresh counts;
+- per-source call and latency mappings.
+
+## Buffered observability
+
+### `BufferedEventSink`
+
+- `emit(...)`
+- `flush(timeout=None) -> bool`
+- `close(timeout=5.0, drain=True) -> bool`
+- `stats() -> BufferedSinkStats`
+
+### `BufferedMetricsSink`
+
+Implements `MetricsSink` and exposes the same lifecycle methods.
+
+### Buffer policies
+
+- `BufferOverflowPolicy.DROP_OLDEST`
+- `BufferOverflowPolicy.DROP_NEWEST`
+- `BufferOverflowPolicy.RAISE`

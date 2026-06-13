@@ -68,6 +68,8 @@ class SnapshotSession:
         if not requested:
             raise ValueError("at least one resource key is required")
 
+        self._runtime.diagnostics.record_requested(requested)
+
         if retry_errors:
             for key in requested:
                 self._errors.pop(key, None)
@@ -107,11 +109,18 @@ class SnapshotSession:
     def snapshot(self) -> Snapshot:
         """Return an immutable view of everything explicitly requested in this session."""
 
+        diagnostics = self._runtime.diagnostics.snapshot(
+            now_monotonic=self._builder.clock.monotonic(),
+            resolved_resources=len(self._resources),
+            failed_resources=len(self._errors),
+            observed_at_values=tuple(value.observed_at for value in self._resources.values()),
+        )
         return Snapshot(
             snapshot_id=self.snapshot_id,
             created_at=self.created_at,
             resources=self._resources,
             errors=self._errors,
+            diagnostics=diagnostics,
         )
 
     async def close(self) -> None:

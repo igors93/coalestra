@@ -171,3 +171,70 @@ A deadline is created once per build or session using a monotonic clock. Source 
 - `ResiliencePolicyResolver`
 
 Transport and application adapters remain outside the core package.
+
+## Generic resource identity
+
+Resource identity is exact and case-preserving unless the caller supplies a `KeyNormalizer`. This prevents the core from assuming that identifiers behave like market symbols. Qualifiers form an immutable sorted tuple and are part of complete identity.
+
+```text
+namespace + name + subject + qualifiers
+                    |
+                    v
+cache / single-flight / circuits / snapshots
+```
+
+The legacy lower/lower/upper normalization remains available as an explicit compatibility policy.
+
+## Batch cache path
+
+The cache path mirrors source batching:
+
+1. The builder removes values pinned in the session.
+2. It resolves policies for the remaining keys.
+3. If the cache implements `BatchAsyncCache`, it performs one `get_many` call.
+4. Fresh and refresh-eligible values are classified locally.
+5. Fresh source results are grouped into `set_many` operations.
+6. Older-than-`max_stale_seconds` memory entries are removed during lookup.
+
+Single-key custom caches remain supported through concurrent fallback calls.
+
+## Refresh state machine
+
+```text
+fresh, outside refresh window
+        -> return cache
+
+fresh, inside refresh-ahead window
+        -> return cache + schedule refresh
+
+stale but inside max-stale, SWR
+        -> return stale + schedule refresh
+
+stale in blocking mode
+        -> resolve synchronously + stale-on-error fallback
+
+expired
+        -> resolve synchronously
+```
+
+Background refreshes use the same capacity, resilience and single-flight controls as foreground acquisition. One key has at most one refresh task registered per builder. A refresh must produce a fresh result to be considered successful, and stale refresh results are not written back over the current cache state.
+
+## Diagnostics model
+
+A `DiagnosticsCollector` belongs to one build/session runtime. It records explicit requested keys separately from internal dependencies. `SnapshotSession.snapshot()` freezes the current collector state into `SnapshotDiagnostics`.
+
+Observation skew is the difference between the newest and oldest `observed_at` among resolved resources. It describes temporal consistency but does not enforce a domain threshold.
+
+## Buffered observability model
+
+Buffered sinks preserve the synchronous `EventSink` and `MetricsSink` protocols while moving downstream delivery to a dedicated thread.
+
+```text
+acquisition task
+      |
+      | non-blocking enqueue
+      v
+bounded queue -> worker thread -> downstream sink
+```
+
+The queue is bounded to prevent observability from becoming an unbounded memory leak. Overflow behavior is explicit and measurable. Downstream exceptions are counted by the buffer and never re-enter acquisition control flow.

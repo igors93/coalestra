@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from typing import Any, Protocol, runtime_checkable
 
+from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheLookup,
     FetchContext,
     FreshnessPolicy,
-    ResourceKey,
     Snapshot,
     SnapshotValue,
     SourcePayload,
@@ -40,11 +40,7 @@ class SnapshotSource(SourceBase, Protocol):
 
 @runtime_checkable
 class BatchSnapshotSource(SourceBase, Protocol):
-    """Source capable of resolving several resources with one operation.
-
-    A successful call may return a partial mapping. Missing resources remain unresolved and are
-    offered to lower-priority sources by the builder.
-    """
+    """Source capable of resolving several resources with one operation."""
 
     async def fetch_many(
         self,
@@ -91,7 +87,12 @@ class FreshnessPolicyProvider(Protocol):
 
 
 class AsyncCache(Protocol):
-    """Minimal cache contract required by SnapshotBuilder."""
+    """Minimal cache contract required by SnapshotBuilder.
+
+    Existing custom caches only need the original single-key methods. Implement
+    :class:`BatchAsyncCache` to let the builder perform one cache operation for a complete set of
+    resources.
+    """
 
     async def get(
         self,
@@ -106,6 +107,23 @@ class AsyncCache(Protocol):
     async def invalidate(self, key: ResourceKey) -> None: ...
 
     async def clear(self) -> None: ...
+
+
+@runtime_checkable
+class BatchAsyncCache(Protocol):
+    """Optional cache capability for efficient multi-key operations."""
+
+    async def get_many(
+        self,
+        keys: Collection[ResourceKey],
+        *,
+        now: float,
+        policies: Mapping[ResourceKey, FreshnessPolicy],
+    ) -> Mapping[ResourceKey, CacheLookup]: ...
+
+    async def set_many(self, values: Collection[SnapshotValue[Any]]) -> None: ...
+
+    async def invalidate_many(self, keys: Collection[ResourceKey]) -> None: ...
 
 
 class EventSink(Protocol):

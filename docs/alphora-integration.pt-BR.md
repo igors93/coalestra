@@ -303,3 +303,82 @@ Após comparação shadow:
 - cache hits e single-flight joins;
 - stale fallbacks;
 - duração do estágio base, estágio pesado e sessão completa.
+
+## Recomendações para a versão 0.4
+
+### Normalização de chaves
+
+Como a identidade agora preserva case, normalize símbolos no adaptador do Alphora, não no núcleo da biblioteca:
+
+```python
+def symbol_key(namespace: str, name: str, symbol: str) -> ResourceKey:
+    return ResourceKey(namespace, name, symbol.upper().strip())
+```
+
+Para migração imediata sem alterar factories existentes, use `LEGACY_KEY_NORMALIZER`.
+
+Use qualifiers para candles e outros recursos parametrizados:
+
+```python
+def candles(symbol: str, interval: str, limit: int) -> ResourceKey:
+    return ResourceKey(
+        "market",
+        "candles",
+        symbol.upper().strip(),
+        {"interval": interval, "limit": limit},
+    )
+```
+
+### Políticas de refresh sugeridas
+
+Mercado em stream:
+
+```python
+FreshnessPolicy(
+    ttl_seconds=2.0,
+    max_stale_seconds=10.0,
+    refresh_mode=RefreshMode.STALE_WHILE_REVALIDATE,
+)
+```
+
+Regras da exchange:
+
+```python
+FreshnessPolicy(
+    ttl_seconds=300.0,
+    max_stale_seconds=1800.0,
+    refresh_mode=RefreshMode.REFRESH_AHEAD,
+    refresh_ahead_seconds=30.0,
+)
+```
+
+Posições, ordens e conta que participam diretamente da decisão devem continuar em `BLOCKING` até que o comportamento operacional seja medido e aprovado.
+
+### Cache
+
+O cache em memória padrão é limitado. Para o vocabulário atual do Alphora, 10.000 entradas é mais que suficiente. Monitore `CacheStats` e ajuste somente se qualifiers de candles ou outros recursos criarem cardinalidade alta.
+
+Use `invalidate_namespace("market", name="candles")` ao trocar uma configuração global de timeframe.
+
+### Observabilidade
+
+O Alphora atualmente grava muitos eventos no caminho crítico. Use sinks bufferizados entre a Coalestra e o journal/audit logger:
+
+```python
+events = BufferedEventSink(alphora_event_sink, max_pending=20_000)
+metrics = BufferedMetricsSink(alphora_metrics_sink, max_pending=20_000)
+```
+
+Feche os sinks no shutdown depois de fechar o provider.
+
+### Métricas por ciclo
+
+Grave diretamente `cycle_context.operational_snapshot.diagnostics` no evento de término do ciclo. Os campos mais importantes para a primeira integração são:
+
+- `duration_ms`;
+- `cache_hits` e `cache_misses`;
+- `source_calls` e `source_calls_by_source`;
+- `batch_calls`;
+- `coalesced_requests`;
+- `refresh_scheduled`, `refresh_completed` e `refresh_failed`;
+- `observation_skew_ms`.

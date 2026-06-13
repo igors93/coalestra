@@ -224,9 +224,14 @@ class SyncSnapshotBuilder:
         )
         return SyncSnapshotSession(self, session)
 
+    def wait_for_refreshes(self) -> None:
+        self._ensure_open()
+        self._submit(self.builder.wait_for_refreshes())
+
     def close(self) -> None:
         if self._closed:
             return
+        self._submit(self.builder.wait_for_refreshes())
         self._closed = True
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2.0)

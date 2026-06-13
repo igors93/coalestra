@@ -1,21 +1,19 @@
 # Changelog
 
-## 0.3.0 - 2026-06-13
+## 0.4.0 - 2026-06-13
 
-- Changed `max_concurrency` into a builder-wide capacity limit shared by all builds and sessions.
-- Added optional per-source concurrency limits through source declarations and builder overrides.
-- Added cancellation-safe capacity accounting and capacity diagnostics.
-- Added `CircuitScope` with source, namespace, subject, and resource isolation.
-- Added `CircuitBreakerPolicy`, `SourceResiliencePolicy`, and `ResiliencePolicyResolver`.
-- Added source-specific retry behavior and scoped circuit policies.
-- Added per-identity circuit handling for partial batch calls.
-- Added stale-payload circuit outcomes and abandoned half-open probe recovery.
-- Added `ResourcePublisher` for direct event-driven cache updates.
-- Added monotonic publication, duplicate rejection, forced reconciliation, bulk publication, and invalidation.
-- Added `SyncResourcePublisher` with blocking and non-blocking publication.
-- Preserved session pinning when newer events are published during a session.
-- Fixed deadline handling so an expired deadline does not create an unawaited source coroutine.
-- Expanded the test suite to 56 scenarios.
+- Made `ResourceKey` case-preserving by default and added configurable `KeyNormalizer` policies.
+- Added immutable, order-independent resource qualifiers for parameterized resources.
+- Added `LEGACY_KEY_NORMALIZER` and migration helpers for 0.1-0.3 behavior.
+- Added `BatchAsyncCache`, cache `get_many`/`set_many`/`invalidate_many`, namespace invalidation, pruning, and cache statistics.
+- Added a bounded default memory-cache size with LRU eviction and automatic removal of fully expired entries.
+- Added `RefreshMode.BLOCKING`, `STALE_WHILE_REVALIDATE`, and `REFRESH_AHEAD`.
+- Added cancellation-safe background refresh scheduling, deduplication, lifecycle methods, and synchronous waiting.
+- Added immutable `SnapshotDiagnostics` with per-session cache, source, batch, refresh, coalescing, latency, and observation-skew data.
+- Added `BufferedEventSink` and `BufferedMetricsSink` with bounded queues and explicit overflow policies.
+- Updated bulk publication to use cache batch operations under stable striped locking.
+- Prevented background refreshes from replacing cache state with stale results.
+- Expanded the test suite to 72 scenarios.
 
 ## 0.2.0 - 2026-06-13
 

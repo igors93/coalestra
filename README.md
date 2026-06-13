@@ -15,9 +15,13 @@ It coalesces duplicate requests, batches compatible resources, derives values fr
 - Optional per-source concurrency limits.
 - Source-specific retry and circuit-breaker policies.
 - Circuit isolation by source, namespace, subject, or full resource.
-- Per-resource TTL, stale windows, and stale-on-error fallback.
+- Case-preserving resource identity with configurable normalization and qualifiers.
+- Batch cache reads/writes, bounded LRU storage, pruning, invalidation, and cache statistics.
+- Per-resource TTL, stale windows, stale-on-error fallback, and background refresh modes.
 - Direct asynchronous and synchronous event publication into the cache.
 - Monotonic publication that rejects older or duplicate events by default.
+- Consolidated immutable diagnostics on every snapshot.
+- Buffered event and metrics sinks that keep downstream I/O outside the acquisition path.
 - Replaceable cache, clock, event, and metrics interfaces.
 - Async API plus persistent synchronous facades.
 - Strict static typing and no runtime dependencies.
@@ -29,6 +33,92 @@ python -m pip install -e ".[dev]"
 ```
 
 Python 3.10 or newer is supported.
+
+## Generic resource identity
+
+`ResourceKey` preserves case by default, trims surrounding whitespace and supports immutable qualifiers:
+
+```python
+from coalestra import ResourceKey
+
+candles = ResourceKey(
+    "market",
+    "candles",
+    "BTCUSDT",
+    {"interval": "1m", "limit": 500},
+)
+
+assert candles.qualifier("interval") == "1m"
+```
+
+Qualifiers are normalized into a sorted tuple, so mapping insertion order does not affect equality or hashing. Systems with case-insensitive identity can opt in to a normalizer:
+
+```python
+from coalestra import CASE_INSENSITIVE_KEY_NORMALIZER, ResourceKey
+
+key = ResourceKey(
+    "Tenant-A",
+    "DocumentId",
+    "/Path/File",
+    normalizer=CASE_INSENSITIVE_KEY_NORMALIZER,
+)
+```
+
+`LEGACY_KEY_NORMALIZER` and `ResourceKey.legacy(...)` reproduce Coalestra 0.1-0.3 behavior.
+
+## Batch cache operations and refresh policies
+
+`AsyncMemoryCache` performs multi-key reads and writes under one lock, defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation. Custom caches may implement `BatchAsyncCache`; older single-key caches remain supported.
+
+Freshness policies support three refresh modes:
+
+```python
+from coalestra import FreshnessPolicy, RefreshMode
+
+policy = FreshnessPolicy(
+    ttl_seconds=5.0,
+    max_stale_seconds=30.0,
+    refresh_mode=RefreshMode.STALE_WHILE_REVALIDATE,
+)
+```
+
+- `BLOCKING`: wait for a fresh source when the cache is outside TTL.
+- `STALE_WHILE_REVALIDATE`: return an acceptable stale value and refresh it in the background.
+- `REFRESH_AHEAD`: return a fresh value and refresh it before TTL expiry.
+
+Long-lived asynchronous applications can call `await builder.wait_for_refreshes()`. `SyncSnapshotBuilder.close()` waits for pending refreshes before stopping its event loop.
+
+## Snapshot diagnostics
+
+Every snapshot contains immutable acquisition diagnostics:
+
+```python
+snapshot = await builder.build(keys)
+print(snapshot.diagnostics.cache_hits)
+print(snapshot.diagnostics.source_calls_by_source)
+print(snapshot.diagnostics.observation_skew_ms)
+```
+
+Diagnostics include requested, resolved and failed resource counts; cache hits/misses and batch operations; stale values and coalesced requests; source, batch and derived calls; refresh outcomes; per-source latency totals; total duration; and observation-time skew.
+
+## Buffered observability
+
+Wrap a potentially slow sink so logging or metrics export does not run on the acquisition path:
+
+```python
+from coalestra import BufferedEventSink, BufferedMetricsSink
+
+events = BufferedEventSink(file_event_sink, max_pending=10_000)
+metrics = BufferedMetricsSink(prometheus_adapter, max_pending=10_000)
+
+builder = SnapshotBuilder(sources, events=events, metrics=metrics)
+
+# During shutdown
+events.close()
+metrics.close()
+```
+
+The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution.
 
 ## Minimal build
 
@@ -286,8 +376,8 @@ This runs formatting, linting, strict mypy, tests, and package build.
 
 - [Architecture](docs/architecture.md)
 - [Public API](docs/public-api.md)
-- [Migration from 0.2](docs/migration-0.3.md)
-- [Implementação 4, 5 e 6](docs/implementation-4-5-6.pt-BR.md)
+- [Migration from 0.3](docs/migration-0.4.md)
+- [Implementação 7, 8 e 9](docs/implementation-7-8-9.pt-BR.md)
 - [Integração com o Alphora](docs/alphora-integration.pt-BR.md)
 - [Changelog](CHANGELOG.md)
 

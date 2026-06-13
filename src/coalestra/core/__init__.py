@@ -1,4 +1,5 @@
 from coalestra.core.clock import SystemClock
+from coalestra.core.diagnostics import DiagnosticsCollector, SnapshotDiagnostics
 from coalestra.core.errors import (
     CircuitOpenError,
     CoalestraError,
@@ -12,17 +13,25 @@ from coalestra.core.errors import (
     SourceTimeoutError,
     SourceUnavailableError,
 )
+from coalestra.core.keys import (
+    CASE_INSENSITIVE_KEY_NORMALIZER,
+    LEGACY_KEY_NORMALIZER,
+    PRESERVE_KEY_NORMALIZER,
+    KeyNormalizer,
+    ResourceKey,
+)
 from coalestra.core.models import (
     CacheLookup,
     FetchContext,
     FreshnessPolicy,
-    ResourceKey,
+    RefreshMode,
     Snapshot,
     SnapshotValue,
     SourcePayload,
 )
 from coalestra.core.protocols import (
     AsyncCache,
+    BatchAsyncCache,
     BatchSnapshotSource,
     Clock,
     ConcurrencyLimitedSource,
@@ -37,7 +46,11 @@ from coalestra.core.protocols import (
 )
 
 __all__ = [
+    "CASE_INSENSITIVE_KEY_NORMALIZER",
+    "LEGACY_KEY_NORMALIZER",
+    "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
+    "BatchAsyncCache",
     "BatchSnapshotSource",
     "CacheLookup",
     "CircuitOpenError",
@@ -47,17 +60,21 @@ __all__ = [
     "DependencyCycleError",
     "DependencyResolutionError",
     "DerivedSource",
+    "DiagnosticsCollector",
     "EventSink",
     "FetchContext",
     "FreshnessPolicy",
     "FreshnessPolicyProvider",
+    "KeyNormalizer",
     "MetricsSink",
+    "RefreshMode",
     "ResilienceConfiguredSource",
     "ResourceKey",
     "ResourceResolutionError",
     "SessionClosedError",
     "Snapshot",
     "SnapshotBuildError",
+    "SnapshotDiagnostics",
     "SnapshotSource",
     "SnapshotValue",
     "Source",

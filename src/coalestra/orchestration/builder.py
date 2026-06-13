@@ -11,6 +11,7 @@ from coalestra.cache.memory import AsyncMemoryCache
 from coalestra.cache.publisher import ResourcePublisher
 from coalestra.concurrency.capacity import CapacityController, CapacitySnapshot
 from coalestra.core.clock import SystemClock
+from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.errors import (
     CircuitOpenError,
     DependencyCycleError,
@@ -23,8 +24,10 @@ from coalestra.core.errors import (
     SourceUnavailableError,
 )
 from coalestra.core.models import (
+    CacheLookup,
     FetchContext,
     FreshnessPolicy,
+    RefreshMode,
     ResourceKey,
     Snapshot,
     SnapshotValue,
@@ -32,6 +35,7 @@ from coalestra.core.models import (
 )
 from coalestra.core.protocols import (
     AsyncCache,
+    BatchAsyncCache,
     BatchSnapshotSource,
     Clock,
     DerivedSource,
@@ -83,7 +87,9 @@ class _SourceAttempt:
 
 @dataclass
 class _ResolutionRuntime:
+    diagnostics: DiagnosticsCollector
     memo: dict[ResourceKey, SnapshotValue[Any]] = field(default_factory=dict)
+    cache_stale_results: bool = True
 
 
 class SnapshotBuilder:
@@ -159,6 +165,8 @@ class SnapshotBuilder:
             declared_limit = getattr(source, "max_concurrency", None)
             if self.capacity.limit_for(source.name) is None:
                 self.capacity.register_source(source.name, declared_limit)
+        self._background_refreshes: dict[ResourceKey, asyncio.Task[None]] = {}
+        self._closed = False
         self.publisher = ResourcePublisher(
             cache=self.cache,
             clock=self.clock,
@@ -171,6 +179,38 @@ class SnapshotBuilder:
         """Return builder-wide and per-source capacity diagnostics."""
 
         return await self.capacity.snapshot()
+
+    async def wait_for_refreshes(self) -> None:
+        """Wait until every currently scheduled background refresh finishes."""
+
+        while self._background_refreshes:
+            tasks = tuple(self._background_refreshes.values())
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def aclose(self, *, cancel_refreshes: bool = False) -> None:
+        """Close the builder and settle background refresh work."""
+
+        if self._closed:
+            return
+        self._closed = True
+        tasks = tuple(self._background_refreshes.values())
+        if cancel_refreshes:
+            for task in tasks:
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def __aenter__(self) -> SnapshotBuilder:
+        self._ensure_open()
+        return self
+
+    async def __aexit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        await self.aclose()
 
     async def build(
         self,
@@ -186,6 +226,7 @@ class SnapshotBuilder:
         This method remains the compact API. Multi-stage consumers should use ``session()``.
         """
 
+        self._ensure_open()
         session = self.session(
             deadline_seconds=deadline_seconds,
             metadata=metadata,
@@ -214,6 +255,7 @@ class SnapshotBuilder:
 
         from coalestra.orchestration.session import SnapshotSession
 
+        self._ensure_open()
         if deadline_seconds is not None and deadline_seconds <= 0:
             raise ValueError("deadline_seconds must be positive")
 
@@ -228,7 +270,9 @@ class SnapshotBuilder:
             metadata=metadata or {},
             snapshot_id=resolved_snapshot_id,
         )
-        runtime = _ResolutionRuntime()
+        runtime = _ResolutionRuntime(
+            diagnostics=DiagnosticsCollector(started_monotonic=self.clock.monotonic())
+        )
         return SnapshotSession(
             builder=self,
             context=context,
@@ -248,24 +292,82 @@ class SnapshotBuilder:
         values: dict[ResourceKey, SnapshotValue[Any]] = {}
         errors: dict[ResourceKey, Exception] = {}
         stale_candidates: dict[ResourceKey, SnapshotValue[Any]] = {}
-        pending: list[ResourceKey] = []
+        cache_keys: list[ResourceKey] = []
 
         for key in unique_keys:
             memoized = runtime.memo.get(key)
             if memoized is not None:
                 values[key] = memoized
-                continue
+            else:
+                cache_keys.append(key)
 
-            policy = self.policy_resolver.resolve(key)
-            lookup = await self.cache.get(key, now=self.clock.now(), policy=policy)
+        policies = {key: self.policy_resolver.resolve(key) for key in cache_keys}
+        lookups = await self._cache_get_many(
+            cache_keys,
+            now=self.clock.now(),
+            policies=policies,
+            diagnostics=runtime.diagnostics,
+        )
+        pending: list[ResourceKey] = []
+
+        for key in cache_keys:
+            lookup = lookups[key]
+            policy = policies[key]
+            age = lookup.age_seconds
             if lookup.fresh and lookup.value is not None:
+                runtime.diagnostics.cache_hits += 1
                 self.metrics.increment("cache_access_total", status="fresh", resource=str(key))
                 self.events.emit("cache_hit", resource=str(key), freshness="fresh")
-                cached = self._cached_copy(lookup.value, stale=False)
+                refresh_scheduled = False
+                if age is not None and policy.should_refresh_ahead(age):
+                    refresh_scheduled = self._schedule_refresh(
+                        key,
+                        parent_context=context,
+                        diagnostics=runtime.diagnostics,
+                        reason="refresh_ahead",
+                    )
+                cached = self._cached_copy(
+                    lookup.value,
+                    stale=False,
+                    extra_metadata={"refresh_scheduled": refresh_scheduled}
+                    if refresh_scheduled
+                    else None,
+                )
                 runtime.memo[key] = cached
                 values[key] = cached
                 continue
 
+            if (
+                lookup.value is not None
+                and lookup.usable_stale
+                and policy.refresh_mode is RefreshMode.STALE_WHILE_REVALIDATE
+            ):
+                runtime.diagnostics.cache_hits += 1
+                runtime.diagnostics.stale_values += 1
+                self.metrics.increment(
+                    "cache_access_total",
+                    status="stale_while_revalidate",
+                    resource=str(key),
+                )
+                refresh_scheduled = self._schedule_refresh(
+                    key,
+                    parent_context=context,
+                    diagnostics=runtime.diagnostics,
+                    reason="stale_while_revalidate",
+                )
+                cached = self._cached_copy(
+                    lookup.value,
+                    stale=True,
+                    extra_metadata={
+                        "refresh_mode": RefreshMode.STALE_WHILE_REVALIDATE.value,
+                        "refresh_scheduled": refresh_scheduled,
+                    },
+                )
+                runtime.memo[key] = cached
+                values[key] = cached
+                continue
+
+            runtime.diagnostics.cache_misses += 1
             self.metrics.increment("cache_access_total", status="miss", resource=str(key))
             if lookup.usable_stale and lookup.value is not None:
                 stale_candidates[key] = lookup.value
@@ -308,6 +410,7 @@ class SnapshotBuilder:
             if result.value is not None:
                 value = result.value
                 if joined_existing:
+                    runtime.diagnostics.coalesced_requests += 1
                     self.metrics.increment("singleflight_join_total", resource=str(key))
                     value = replace(
                         value,
@@ -315,12 +418,15 @@ class SnapshotBuilder:
                     )
                 runtime.memo[key] = value
                 values[key] = value
+                if value.stale:
+                    runtime.diagnostics.stale_values += 1
                 continue
 
             error = cast(Exception, result.error)
             policy = self.policy_resolver.resolve(key)
             stale_candidate = stale_candidates.get(key)
             if stale_candidate is not None and policy.allow_stale_on_error:
+                runtime.diagnostics.stale_values += 1
                 self.metrics.increment(
                     "cache_access_total",
                     status="stale_fallback",
@@ -391,6 +497,7 @@ class SnapshotBuilder:
                 local_owned=local_owned,
             )
 
+            fresh_values: list[SnapshotValue[Any]] = []
             for key in candidates:
                 attempt = attempts[key]
                 if attempt.error is not None:
@@ -438,7 +545,7 @@ class SnapshotBuilder:
                     )
                     continue
 
-                await self.cache.set(value)
+                fresh_values.append(value)
                 runtime.memo[key] = value
                 resolved[key] = _ResolutionResult(value=value)
                 self.metrics.increment("source_fetch_total", status="success", source=source.name)
@@ -456,15 +563,19 @@ class SnapshotBuilder:
                     source_kind=self._source_kind(source),
                 )
 
+            if fresh_values:
+                await self._cache_set_many(fresh_values, diagnostics=runtime.diagnostics)
+
             unresolved = [key for key in unresolved if key not in resolved]
             if not unresolved:
                 break
 
+        stale_to_cache: list[SnapshotValue[Any]] = []
         for key in unresolved:
             policy = self.policy_resolver.resolve(key)
             stale = best_stale.get(key)
             if stale is not None and policy.allow_stale_on_error:
-                await self.cache.set(stale)
+                stale_to_cache.append(stale)
                 runtime.memo[key] = stale
                 self.metrics.increment("source_fetch_total", status="stale", source=stale.source)
                 resolved[key] = _ResolutionResult(value=stale)
@@ -473,6 +584,8 @@ class SnapshotBuilder:
                 error=ResourceResolutionError(key, tuple(failures[key]))
             )
 
+        if stale_to_cache and runtime.cache_stale_results:
+            await self._cache_set_many(stale_to_cache, diagnostics=runtime.diagnostics)
         return resolved
 
     async def _attempt_source(
@@ -528,7 +641,7 @@ class SnapshotBuilder:
                     policy=resilience.circuit,
                 )
                 payload, attempts = await run_with_retry(
-                    partial(self._fetch_once, source, key, context),
+                    partial(self._fetch_once, source, key, context, runtime),
                     policy=resilience.retry,
                     retryable=self._is_retryable,
                 )
@@ -570,6 +683,8 @@ class SnapshotBuilder:
                 )
 
         completed = await asyncio.gather(*(fetch_one(key) for key in keys))
+        for _key, attempt in completed:
+            runtime.diagnostics.record_source_latency(source.name, attempt.latency_ms)
         return dict(completed)
 
     async def _attempt_batch_source(
@@ -612,11 +727,12 @@ class SnapshotBuilder:
 
         try:
             payloads, attempts = await run_with_retry(
-                partial(self._fetch_many_once, source, active_keys, context),
+                partial(self._fetch_many_once, source, active_keys, context, runtime),
                 policy=resilience.retry,
                 retryable=self._is_retryable,
             )
             latency_ms = self._elapsed_ms(started)
+            runtime.diagnostics.record_source_latency(source.name, latency_ms)
             returned = set(payloads)
             for representative, grouped_keys in active_groups:
                 has_fresh_value = any(
@@ -678,6 +794,7 @@ class SnapshotBuilder:
                     policy=resilience.circuit,
                 )
             latency_ms = self._elapsed_ms(started)
+            runtime.diagnostics.record_source_latency(source.name, latency_ms)
             self.metrics.increment(
                 "source_batch_call_total",
                 status="failure",
@@ -749,6 +866,7 @@ class SnapshotBuilder:
                         key,
                         dependency_snapshot,
                         context,
+                        runtime,
                     ),
                     policy=resilience.retry,
                     retryable=self._is_retryable,
@@ -797,6 +915,8 @@ class SnapshotBuilder:
                 )
 
         completed = await asyncio.gather(*(derive_one(key) for key in keys))
+        for _key, attempt in completed:
+            runtime.diagnostics.record_source_latency(source.name, attempt.latency_ms)
         return dict(completed)
 
     async def _fetch_once(
@@ -804,10 +924,12 @@ class SnapshotBuilder:
         source: SnapshotSource,
         key: ResourceKey,
         context: FetchContext,
+        runtime: _ResolutionRuntime,
     ) -> SourcePayload[Any]:
         async def invoke() -> SourcePayload[Any]:
             wait_started = self.clock.monotonic()
             async with self.capacity.slot(source.name):
+                runtime.diagnostics.record_source_call(source.name, kind="single")
                 self.metrics.observe(
                     "source_capacity_wait_ms",
                     self._elapsed_ms(wait_started),
@@ -822,10 +944,12 @@ class SnapshotBuilder:
         source: BatchSnapshotSource,
         keys: tuple[ResourceKey, ...],
         context: FetchContext,
+        runtime: _ResolutionRuntime,
     ) -> Mapping[ResourceKey, SourcePayload[Any]]:
         async def invoke() -> Mapping[ResourceKey, SourcePayload[Any]]:
             wait_started = self.clock.monotonic()
             async with self.capacity.slot(source.name):
+                runtime.diagnostics.record_source_call(source.name, kind="batch")
                 self.metrics.observe(
                     "source_capacity_wait_ms",
                     self._elapsed_ms(wait_started),
@@ -854,10 +978,12 @@ class SnapshotBuilder:
         key: ResourceKey,
         dependencies: Snapshot,
         context: FetchContext,
+        runtime: _ResolutionRuntime,
     ) -> SourcePayload[Any]:
         async def invoke() -> SourcePayload[Any]:
             wait_started = self.clock.monotonic()
             async with self.capacity.slot(source.name):
+                runtime.diagnostics.record_source_call(source.name, kind="derived")
                 self.metrics.observe(
                     "source_capacity_wait_ms",
                     self._elapsed_ms(wait_started),
@@ -1067,6 +1193,151 @@ class SnapshotBuilder:
             attempts=attempts,
         )
 
+    async def _cache_get_many(
+        self,
+        keys: Collection[ResourceKey],
+        *,
+        now: float,
+        policies: Mapping[ResourceKey, FreshnessPolicy],
+        diagnostics: DiagnosticsCollector,
+    ) -> Mapping[ResourceKey, CacheLookup]:
+        unique = tuple(dict.fromkeys(keys))
+        if not unique:
+            return {}
+        if isinstance(self.cache, BatchAsyncCache):
+            diagnostics.cache_batch_reads += 1
+            return await self.cache.get_many(unique, now=now, policies=policies)
+        completed = await asyncio.gather(
+            *(self.cache.get(key, now=now, policy=policies[key]) for key in unique)
+        )
+        return dict(zip(unique, completed, strict=True))
+
+    async def _cache_set_many(
+        self,
+        values: Collection[SnapshotValue[Any]],
+        *,
+        diagnostics: DiagnosticsCollector,
+    ) -> None:
+        unique = tuple({value.key: value for value in values}.values())
+        if not unique:
+            return
+        if isinstance(self.cache, BatchAsyncCache):
+            diagnostics.cache_batch_writes += 1
+            await self.cache.set_many(unique)
+            return
+        await asyncio.gather(*(self.cache.set(value) for value in unique))
+
+    def _schedule_refresh(
+        self,
+        key: ResourceKey,
+        *,
+        parent_context: FetchContext,
+        diagnostics: DiagnosticsCollector,
+        reason: str,
+    ) -> bool:
+        if self._closed:
+            return False
+        existing = self._background_refreshes.get(key)
+        if existing is not None and not existing.done():
+            return True
+        diagnostics.refresh_scheduled += 1
+        task = asyncio.create_task(
+            self._refresh_resource(
+                key,
+                parent_context=parent_context,
+                diagnostics=diagnostics,
+                reason=reason,
+            ),
+            name=f"coalestra-refresh:{key}",
+        )
+        self._background_refreshes[key] = task
+
+        def cleanup(completed: asyncio.Task[None], resource: ResourceKey = key) -> None:
+            self._finish_refresh(resource, completed)
+
+        task.add_done_callback(cleanup)
+        self.metrics.increment("resource_refresh_total", status="scheduled", resource=str(key))
+        self.events.emit(
+            "resource_refresh_scheduled",
+            resource=str(key),
+            reason=reason,
+            snapshot_id=parent_context.snapshot_id,
+        )
+        return True
+
+    async def _refresh_resource(
+        self,
+        key: ResourceKey,
+        *,
+        parent_context: FetchContext,
+        diagnostics: DiagnosticsCollector,
+        reason: str,
+    ) -> None:
+        now = self.clock.now()
+        context = FetchContext(
+            requested_at=now,
+            metadata={
+                **parent_context.metadata,
+                "background_refresh": True,
+                "refresh_reason": reason,
+                "parent_snapshot_id": parent_context.snapshot_id,
+            },
+            snapshot_id=f"{parent_context.snapshot_id}:refresh:{uuid.uuid4().hex[:8]}",
+        )
+        runtime = _ResolutionRuntime(
+            diagnostics=diagnostics,
+            cache_stale_results=False,
+        )
+        try:
+            flight_results = await self.single_flight.run_many(
+                (key,),
+                lambda owned: self._resolve_owned_keys(
+                    owned,
+                    context=context,
+                    runtime=runtime,
+                    ancestry=(),
+                    local_owned=frozenset(owned),
+                ),
+            )
+            result, _joined = flight_results[key]
+            if result.value is None or result.value.stale:
+                error = result.error or SourceUnavailableError(
+                    f"background refresh for {key} did not produce a fresh value"
+                )
+                raise error
+            diagnostics.refresh_completed += 1
+            self.metrics.increment("resource_refresh_total", status="success", resource=str(key))
+            self.events.emit(
+                "resource_refresh_completed",
+                resource=str(key),
+                source=result.value.source,
+                reason=reason,
+            )
+        except asyncio.CancelledError:
+            diagnostics.refresh_failed += 1
+            self.metrics.increment("resource_refresh_total", status="cancelled", resource=str(key))
+            raise
+        except Exception as error:
+            diagnostics.refresh_failed += 1
+            self.metrics.increment("resource_refresh_total", status="failure", resource=str(key))
+            self.events.emit(
+                "resource_refresh_failed",
+                resource=str(key),
+                reason=reason,
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+
+    def _finish_refresh(self, key: ResourceKey, task: asyncio.Task[None]) -> None:
+        if self._background_refreshes.get(key) is task:
+            self._background_refreshes.pop(key, None)
+        if not task.cancelled():
+            task.exception()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("SnapshotBuilder is closed")
+
     def _cached_copy(
         self,
         value: SnapshotValue[Any],
@@ -1097,4 +1368,5 @@ class SnapshotBuilder:
             resolved=len(snapshot.resources),
             failed=len(snapshot.errors),
             strict=strict,
+            diagnostics=snapshot.diagnostics,
         )

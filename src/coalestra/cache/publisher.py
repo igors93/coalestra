@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Mapping
+from collections.abc import AsyncIterator, Collection, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
-from coalestra.core.models import FreshnessPolicy, ResourceKey, SnapshotValue
+from coalestra.core.keys import ResourceKey
+from coalestra.core.models import FreshnessPolicy, SnapshotValue
 from coalestra.core.protocols import (
     AsyncCache,
+    BatchAsyncCache,
     Clock,
     EventSink,
     FreshnessPolicyProvider,
@@ -59,9 +62,8 @@ class PublishResult:
 class ResourcePublisher:
     """Publish event-stream or in-process state directly into a Coalestra cache.
 
-    Publications are monotonic by ``observed_at`` by default: an older event cannot overwrite a
-    newer cached value. A fixed set of striped locks prevents races without retaining one lock per
-    resource forever.
+    Publications are monotonic by ``observed_at`` by default. Bulk publication acquires striped
+    locks in a stable order and uses cache batch operations when available.
     """
 
     def __init__(
@@ -98,15 +100,14 @@ class ResourcePublisher:
         force: bool = False,
         replace_equal: bool = False,
     ) -> PublishResult:
-        update = ResourceUpdate(
-            key=key,
-            value=value,
-            source=source,
-            observed_at=observed_at,
-            metadata=metadata or {},
-        )
         return await self.publish_update(
-            update,
+            ResourceUpdate(
+                key=key,
+                value=value,
+                source=source,
+                observed_at=observed_at,
+                metadata=metadata or {},
+            ),
             force=force,
             replace_equal=replace_equal,
         )
@@ -118,65 +119,12 @@ class ResourcePublisher:
         force: bool = False,
         replace_equal: bool = False,
     ) -> PublishResult:
-        lock = self._lock_for(update.key)
-        async with lock:
-            now = self.clock.now()
-            observed_at = now if update.observed_at is None else float(update.observed_at)
-            lookup = await self.cache.get(
-                update.key,
-                now=now,
-                policy=self._all_values_policy,
-            )
-            previous = lookup.value
-
-            if not force and previous is not None:
-                if previous.observed_at > observed_at:
-                    return self._ignored_result(
-                        PublishStatus.IGNORED_OLDER,
-                        previous,
-                        update,
-                    )
-                if previous.observed_at == observed_at and not replace_equal:
-                    return self._ignored_result(
-                        PublishStatus.IGNORED_DUPLICATE,
-                        previous,
-                        update,
-                    )
-
-            policy = self.policy_resolver.resolve(update.key)
-            published = SnapshotValue(
-                key=update.key,
-                value=update.value,
-                source=update.source,
-                observed_at=observed_at,
-                fetched_at=now,
-                age_seconds=max(0.0, now - observed_at),
-                stale=max(0.0, now - observed_at) > policy.ttl_seconds,
-                from_cache=False,
-                latency_ms=0.0,
-                attempts=0,
-                metadata={**update.metadata, "published": True},
-            )
-            await self.cache.set(published)
-            self.metrics.increment(
-                "resource_publish_total",
-                status=PublishStatus.PUBLISHED.value,
-                source=update.source,
-                resource=str(update.key),
-            )
-            self.events.emit(
-                "resource_published",
-                resource=str(update.key),
-                source=update.source,
-                observed_at=observed_at,
-                replaced=previous is not None,
-                forced=force,
-            )
-            return PublishResult(
-                status=PublishStatus.PUBLISHED,
-                value=published,
-                previous=previous,
-            )
+        results = await self.publish_many(
+            (update,),
+            force=force,
+            replace_equal=replace_equal,
+        )
+        return results[update.key]
 
     async def publish_many(
         self,
@@ -190,23 +138,62 @@ class ResourcePublisher:
             unique[update.key] = update
         if not unique:
             return MappingProxyType({})
-        completed = await asyncio.gather(
-            *(
-                self.publish_update(
-                    update,
+
+        keys = tuple(unique)
+        async with self._locked_keys(keys):
+            now = self.clock.now()
+            previous_values = await self._get_existing(keys, now=now)
+            results: dict[ResourceKey, PublishResult] = {}
+            pending_writes: list[SnapshotValue[Any]] = []
+
+            for key, update in unique.items():
+                observed_at = now if update.observed_at is None else float(update.observed_at)
+                previous = previous_values.get(key)
+                ignored_status = self._ignored_status(
+                    previous,
+                    observed_at=observed_at,
                     force=force,
                     replace_equal=replace_equal,
                 )
-                for update in unique.values()
-            )
-        )
-        return MappingProxyType(dict(zip(unique, completed, strict=True)))
+                if ignored_status is not None and previous is not None:
+                    result = PublishResult(
+                        status=ignored_status,
+                        value=previous,
+                        previous=previous,
+                    )
+                    results[key] = result
+                    self._record_ignored(result, update)
+                    continue
+
+                policy = self.policy_resolver.resolve(key)
+                published = SnapshotValue(
+                    key=key,
+                    value=update.value,
+                    source=update.source,
+                    observed_at=observed_at,
+                    fetched_at=now,
+                    age_seconds=max(0.0, now - observed_at),
+                    stale=max(0.0, now - observed_at) > policy.ttl_seconds,
+                    from_cache=False,
+                    latency_ms=0.0,
+                    attempts=0,
+                    metadata={**update.metadata, "published": True},
+                )
+                pending_writes.append(published)
+                results[key] = PublishResult(
+                    status=PublishStatus.PUBLISHED,
+                    value=published,
+                    previous=previous,
+                )
+
+            await self._set_many(pending_writes)
+            for key, result in results.items():
+                if result.published:
+                    self._record_published(result, unique[key], force=force)
+            return MappingProxyType(results)
 
     async def invalidate(self, key: ResourceKey, *, reason: str = "") -> None:
-        async with self._lock_for(key):
-            await self.cache.invalidate(key)
-        self.metrics.increment("resource_invalidation_total", resource=str(key))
-        self.events.emit("resource_invalidated", resource=str(key), reason=reason)
+        await self.invalidate_many((key,), reason=reason)
 
     async def invalidate_many(
         self,
@@ -215,17 +202,88 @@ class ResourcePublisher:
         reason: str = "",
     ) -> None:
         unique = tuple(dict.fromkeys(keys))
-        await asyncio.gather(*(self.invalidate(key, reason=reason) for key in unique))
+        if not unique:
+            return
+        async with self._locked_keys(unique):
+            if isinstance(self.cache, BatchAsyncCache):
+                await self.cache.invalidate_many(unique)
+            else:
+                await asyncio.gather(*(self.cache.invalidate(key) for key in unique))
+        for key in unique:
+            self.metrics.increment("resource_invalidation_total", resource=str(key))
+            self.events.emit("resource_invalidated", resource=str(key), reason=reason)
 
-    def _ignored_result(
+    async def _get_existing(
         self,
-        status: PublishStatus,
-        previous: SnapshotValue[Any],
+        keys: tuple[ResourceKey, ...],
+        *,
+        now: float,
+    ) -> dict[ResourceKey, SnapshotValue[Any] | None]:
+        policies = dict.fromkeys(keys, self._all_values_policy)
+        if isinstance(self.cache, BatchAsyncCache):
+            lookups = await self.cache.get_many(keys, now=now, policies=policies)
+        else:
+            completed = await asyncio.gather(
+                *(self.cache.get(key, now=now, policy=self._all_values_policy) for key in keys)
+            )
+            lookups = dict(zip(keys, completed, strict=True))
+        return {key: lookups[key].value for key in keys}
+
+    async def _set_many(self, values: Collection[SnapshotValue[Any]]) -> None:
+        if not values:
+            return
+        if isinstance(self.cache, BatchAsyncCache):
+            await self.cache.set_many(values)
+        else:
+            await asyncio.gather(*(self.cache.set(value) for value in values))
+
+    @staticmethod
+    def _ignored_status(
+        previous: SnapshotValue[Any] | None,
+        *,
+        observed_at: float,
+        force: bool,
+        replace_equal: bool,
+    ) -> PublishStatus | None:
+        if force or previous is None:
+            return None
+        if previous.observed_at > observed_at:
+            return PublishStatus.IGNORED_OLDER
+        if previous.observed_at == observed_at and not replace_equal:
+            return PublishStatus.IGNORED_DUPLICATE
+        return None
+
+    def _record_published(
+        self,
+        result: PublishResult,
         update: ResourceUpdate[Any],
-    ) -> PublishResult:
+        *,
+        force: bool,
+    ) -> None:
         self.metrics.increment(
             "resource_publish_total",
-            status=status.value,
+            status=PublishStatus.PUBLISHED.value,
+            source=update.source,
+            resource=str(update.key),
+        )
+        self.events.emit(
+            "resource_published",
+            resource=str(update.key),
+            source=update.source,
+            observed_at=result.value.observed_at,
+            replaced=result.previous is not None,
+            forced=force,
+        )
+
+    def _record_ignored(
+        self,
+        result: PublishResult,
+        update: ResourceUpdate[Any],
+    ) -> None:
+        previous = cast(SnapshotValue[Any], result.previous)
+        self.metrics.increment(
+            "resource_publish_total",
+            status=result.status.value,
             source=update.source,
             resource=str(update.key),
         )
@@ -233,11 +291,21 @@ class ResourcePublisher:
             "resource_publish_ignored",
             resource=str(update.key),
             source=update.source,
-            status=status.value,
+            status=result.status.value,
             observed_at=update.observed_at,
             cached_observed_at=previous.observed_at,
         )
-        return PublishResult(status=status, value=previous, previous=previous)
 
-    def _lock_for(self, key: ResourceKey) -> asyncio.Lock:
-        return self._locks[hash(key) % len(self._locks)]
+    @asynccontextmanager
+    async def _locked_keys(self, keys: Collection[ResourceKey]) -> AsyncIterator[None]:
+        indexes = sorted({hash(key) % len(self._locks) for key in keys})
+        acquired: list[asyncio.Lock] = []
+        try:
+            for index in indexes:
+                lock = self._locks[index]
+                await lock.acquire()
+                acquired.append(lock)
+            yield
+        finally:
+            for lock in reversed(acquired):
+                lock.release()

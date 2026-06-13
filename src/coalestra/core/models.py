@@ -2,50 +2,57 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
+from math import isfinite
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
+
+from coalestra.core.diagnostics import SnapshotDiagnostics
+from coalestra.core.keys import ResourceKey as ResourceKey
 
 T = TypeVar("T")
 
 
-@dataclass(frozen=True, order=True)
-class ResourceKey:
-    """Stable, hashable identifier for one resource in a snapshot."""
+class RefreshMode(str, Enum):
+    """How a cached value is refreshed when it approaches or exceeds its TTL."""
 
-    namespace: str
-    name: str
-    subject: str = ""
-
-    def __post_init__(self) -> None:
-        namespace = self.namespace.strip().lower()
-        name = self.name.strip().lower()
-        subject = self.subject.strip().upper()
-        if not namespace:
-            raise ValueError("namespace cannot be empty")
-        if not name:
-            raise ValueError("name cannot be empty")
-        object.__setattr__(self, "namespace", namespace)
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "subject", subject)
-
-    def __str__(self) -> str:
-        base = f"{self.namespace}:{self.name}"
-        return f"{base}:{self.subject}" if self.subject else base
+    BLOCKING = "blocking"
+    STALE_WHILE_REVALIDATE = "stale_while_revalidate"
+    REFRESH_AHEAD = "refresh_ahead"
 
 
 @dataclass(frozen=True)
 class FreshnessPolicy:
-    """Controls fresh-cache reuse and stale fallback for a resource."""
+    """Controls cache reuse, stale fallback and proactive refresh behavior."""
 
     ttl_seconds: float
     max_stale_seconds: float = 0.0
     allow_stale_on_error: bool = True
+    refresh_mode: RefreshMode = RefreshMode.BLOCKING
+    refresh_ahead_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if self.ttl_seconds < 0:
             raise ValueError("ttl_seconds cannot be negative")
         if self.max_stale_seconds < self.ttl_seconds:
             raise ValueError("max_stale_seconds must be greater than or equal to ttl_seconds")
+        if self.refresh_ahead_seconds < 0:
+            raise ValueError("refresh_ahead_seconds cannot be negative")
+        if self.refresh_mode is RefreshMode.REFRESH_AHEAD:
+            if isfinite(self.ttl_seconds) and self.refresh_ahead_seconds > self.ttl_seconds:
+                raise ValueError("refresh_ahead_seconds cannot exceed ttl_seconds")
+        elif self.refresh_ahead_seconds != 0:
+            raise ValueError("refresh_ahead_seconds is only valid with RefreshMode.REFRESH_AHEAD")
+
+    def should_refresh_ahead(self, age_seconds: float) -> bool:
+        """Whether a still-fresh value has entered its proactive refresh window."""
+
+        if self.refresh_mode is not RefreshMode.REFRESH_AHEAD:
+            return False
+        if not isfinite(self.ttl_seconds):
+            return False
+        threshold = max(0.0, self.ttl_seconds - self.refresh_ahead_seconds)
+        return age_seconds >= threshold
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,7 @@ class CacheLookup:
     value: SnapshotValue[Any] | None
     fresh: bool
     usable_stale: bool
+    age_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,7 @@ class Snapshot(Mapping[ResourceKey, SnapshotValue[Any]]):
     created_at: float
     resources: Mapping[ResourceKey, SnapshotValue[Any]]
     errors: Mapping[ResourceKey, Exception] = field(default_factory=dict)
+    diagnostics: SnapshotDiagnostics = field(default_factory=SnapshotDiagnostics)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "resources", MappingProxyType(dict(self.resources)))

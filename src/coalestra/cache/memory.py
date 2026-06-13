@@ -2,20 +2,48 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from coalestra.core.models import CacheLookup, FreshnessPolicy, ResourceKey, SnapshotValue
+from coalestra.core.keys import ResourceKey
+from coalestra.core.models import CacheLookup, FreshnessPolicy, SnapshotValue
+from coalestra.core.protocols import FreshnessPolicyProvider
+
+
+@dataclass(frozen=True)
+class CacheStats:
+    """Operational counters for :class:`AsyncMemoryCache`."""
+
+    size: int
+    max_entries: int | None
+    hits: int
+    misses: int
+    fresh_hits: int
+    stale_hits: int
+    sets: int
+    invalidations: int
+    evictions: int
+    expirations: int
 
 
 class AsyncMemoryCache:
-    """Concurrency-safe in-memory LRU cache with freshness-aware lookups."""
+    """Concurrency-safe in-memory LRU cache with batch operations and expiry cleanup."""
 
-    def __init__(self, *, max_entries: int | None = None) -> None:
+    def __init__(self, *, max_entries: int | None = 10_000) -> None:
         if max_entries is not None and max_entries < 1:
             raise ValueError("max_entries must be at least 1 or None")
         self.max_entries = max_entries
         self._entries: OrderedDict[ResourceKey, SnapshotValue[Any]] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._hits = 0
+        self._misses = 0
+        self._fresh_hits = 0
+        self._stale_hits = 0
+        self._sets = 0
+        self._invalidations = 0
+        self._evictions = 0
+        self._expirations = 0
 
     async def get(
         self,
@@ -24,37 +52,169 @@ class AsyncMemoryCache:
         now: float,
         policy: FreshnessPolicy,
     ) -> CacheLookup:
+        lookups = await self.get_many((key,), now=now, policies={key: policy})
+        return lookups[key]
+
+    async def get_many(
+        self,
+        keys: Collection[ResourceKey],
+        *,
+        now: float,
+        policies: Mapping[ResourceKey, FreshnessPolicy],
+    ) -> Mapping[ResourceKey, CacheLookup]:
+        unique = tuple(dict.fromkeys(keys))
+        missing_policies = [key for key in unique if key not in policies]
+        if missing_policies:
+            rendered = ", ".join(str(key) for key in missing_policies)
+            raise KeyError(f"missing freshness policies for: {rendered}")
+
+        results: dict[ResourceKey, CacheLookup] = {}
         async with self._lock:
-            value = self._entries.get(key)
-            if value is not None:
+            for key in unique:
+                value = self._entries.get(key)
+                if value is None:
+                    self._misses += 1
+                    results[key] = CacheLookup(
+                        value=None,
+                        fresh=False,
+                        usable_stale=False,
+                        age_seconds=None,
+                    )
+                    continue
+
+                age = max(0.0, now - value.observed_at)
+                policy = policies[key]
+                if age > policy.max_stale_seconds:
+                    self._entries.pop(key, None)
+                    self._misses += 1
+                    self._expirations += 1
+                    results[key] = CacheLookup(
+                        value=None,
+                        fresh=False,
+                        usable_stale=False,
+                        age_seconds=age,
+                    )
+                    continue
+
                 self._entries.move_to_end(key)
-
-        if value is None:
-            return CacheLookup(value=None, fresh=False, usable_stale=False)
-
-        age = max(0.0, now - value.observed_at)
-        return CacheLookup(
-            value=value,
-            fresh=age <= policy.ttl_seconds,
-            usable_stale=age <= policy.max_stale_seconds,
-        )
+                fresh = age <= policy.ttl_seconds
+                self._hits += 1
+                if fresh:
+                    self._fresh_hits += 1
+                else:
+                    self._stale_hits += 1
+                results[key] = CacheLookup(
+                    value=value,
+                    fresh=fresh,
+                    usable_stale=True,
+                    age_seconds=age,
+                )
+        return results
 
     async def set(self, value: SnapshotValue[Any]) -> None:
+        await self.set_many((value,))
+
+    async def set_many(self, values: Collection[SnapshotValue[Any]]) -> None:
+        unique: dict[ResourceKey, SnapshotValue[Any]] = {}
+        for value in values:
+            unique[value.key] = value
+        if not unique:
+            return
         async with self._lock:
-            self._entries[value.key] = value
-            self._entries.move_to_end(value.key)
-            if self.max_entries is not None:
-                while len(self._entries) > self.max_entries:
-                    self._entries.popitem(last=False)
+            for value in unique.values():
+                self._entries[value.key] = value
+                self._entries.move_to_end(value.key)
+                self._sets += 1
+            self._enforce_limit_locked()
 
     async def invalidate(self, key: ResourceKey) -> None:
+        await self.invalidate_many((key,))
+
+    async def invalidate_many(self, keys: Collection[ResourceKey]) -> None:
+        unique = tuple(dict.fromkeys(keys))
         async with self._lock:
-            self._entries.pop(key, None)
+            for key in unique:
+                if self._entries.pop(key, None) is not None:
+                    self._invalidations += 1
+
+    async def invalidate_matching(
+        self,
+        predicate: Callable[[ResourceKey], bool],
+    ) -> tuple[ResourceKey, ...]:
+        """Invalidate every key accepted by ``predicate`` and return removed keys."""
+
+        async with self._lock:
+            removed = tuple(key for key in self._entries if predicate(key))
+            for key in removed:
+                self._entries.pop(key, None)
+            self._invalidations += len(removed)
+            return removed
+
+    async def invalidate_namespace(
+        self,
+        namespace: str,
+        *,
+        name: str | None = None,
+        subject: str | None = None,
+    ) -> tuple[ResourceKey, ...]:
+        """Invalidate a namespace, optionally narrowed by exact name and subject."""
+
+        return await self.invalidate_matching(
+            lambda key: (
+                key.namespace == namespace
+                and (name is None or key.name == name)
+                and (subject is None or key.subject == subject)
+            )
+        )
+
+    async def prune(
+        self,
+        *,
+        now: float,
+        policy_resolver: FreshnessPolicyProvider,
+    ) -> tuple[ResourceKey, ...]:
+        """Remove entries older than their resource-specific maximum stale window."""
+
+        async with self._lock:
+            expired = tuple(
+                key
+                for key, value in self._entries.items()
+                if max(0.0, now - value.observed_at)
+                > policy_resolver.resolve(key).max_stale_seconds
+            )
+            for key in expired:
+                self._entries.pop(key, None)
+            self._expirations += len(expired)
+            return expired
 
     async def clear(self) -> None:
         async with self._lock:
+            removed = len(self._entries)
             self._entries.clear()
+            self._invalidations += removed
 
     async def size(self) -> int:
         async with self._lock:
             return len(self._entries)
+
+    async def stats(self) -> CacheStats:
+        async with self._lock:
+            return CacheStats(
+                size=len(self._entries),
+                max_entries=self.max_entries,
+                hits=self._hits,
+                misses=self._misses,
+                fresh_hits=self._fresh_hits,
+                stale_hits=self._stale_hits,
+                sets=self._sets,
+                invalidations=self._invalidations,
+                evictions=self._evictions,
+                expirations=self._expirations,
+            )
+
+    def _enforce_limit_locked(self) -> None:
+        if self.max_entries is None:
+            return
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+            self._evictions += 1

@@ -1,4 +1,4 @@
-from coalestra.cache.memory import AsyncMemoryCache
+from coalestra.cache.memory import AsyncMemoryCache, CacheStats
 from coalestra.cache.publisher import (
     PublishResult,
     PublishStatus,
@@ -8,6 +8,7 @@ from coalestra.cache.publisher import (
 
 __all__ = [
     "AsyncMemoryCache",
+    "CacheStats",
     "PublishResult",
     "PublishStatus",
     "ResourcePublisher",

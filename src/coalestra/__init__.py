@@ -3,6 +3,7 @@
 from coalestra.adapters import CallableBatchSource, CallableDerivedSource, CallableSource
 from coalestra.cache import (
     AsyncMemoryCache,
+    CacheStats,
     PublishResult,
     PublishStatus,
     ResourcePublisher,
@@ -10,7 +11,11 @@ from coalestra.cache import (
 )
 from coalestra.concurrency import CapacityController, CapacityLimiter, CapacitySnapshot
 from coalestra.core import (
+    CASE_INSENSITIVE_KEY_NORMALIZER,
+    LEGACY_KEY_NORMALIZER,
+    PRESERVE_KEY_NORMALIZER,
     AsyncCache,
+    BatchAsyncCache,
     BatchSnapshotSource,
     CacheLookup,
     CircuitOpenError,
@@ -22,12 +27,15 @@ from coalestra.core import (
     FetchContext,
     FreshnessPolicy,
     FreshnessPolicyProvider,
+    KeyNormalizer,
+    RefreshMode,
     ResilienceConfiguredSource,
     ResourceKey,
     ResourceResolutionError,
     SessionClosedError,
     Snapshot,
     SnapshotBuildError,
+    SnapshotDiagnostics,
     SnapshotSource,
     SnapshotValue,
     SourceFailure,
@@ -37,8 +45,14 @@ from coalestra.core import (
     SourceUnavailableError,
 )
 from coalestra.observability import (
+    BufferedEventSink,
+    BufferedMetricsSink,
+    BufferedSinkStats,
+    BufferOverflowPolicy,
+    EventRecord,
     InMemoryMetrics,
     LoggingEventSink,
+    MetricRecord,
     NullEventSink,
     NullMetrics,
 )
@@ -56,13 +70,22 @@ from coalestra.resilience import (
 )
 from coalestra.sync import SyncResourcePublisher, SyncSnapshotBuilder, SyncSnapshotSession
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
+    "CASE_INSENSITIVE_KEY_NORMALIZER",
+    "LEGACY_KEY_NORMALIZER",
+    "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
     "AsyncMemoryCache",
+    "BatchAsyncCache",
     "BatchSnapshotSource",
+    "BufferOverflowPolicy",
+    "BufferedEventSink",
+    "BufferedMetricsSink",
+    "BufferedSinkStats",
     "CacheLookup",
+    "CacheStats",
     "CallableBatchSource",
     "CallableDerivedSource",
     "CallableSource",
@@ -81,16 +104,20 @@ __all__ = [
     "DependencyCycleError",
     "DependencyResolutionError",
     "DerivedSource",
+    "EventRecord",
     "FetchContext",
     "FreshnessPolicy",
     "FreshnessPolicyProvider",
     "InMemoryMetrics",
+    "KeyNormalizer",
     "LoggingEventSink",
+    "MetricRecord",
     "NullEventSink",
     "NullMetrics",
     "PolicyResolver",
     "PublishResult",
     "PublishStatus",
+    "RefreshMode",
     "ResilienceConfiguredSource",
     "ResiliencePolicyResolver",
     "ResourceKey",
@@ -102,6 +129,7 @@ __all__ = [
     "Snapshot",
     "SnapshotBuildError",
     "SnapshotBuilder",
+    "SnapshotDiagnostics",
     "SnapshotSession",
     "SnapshotSource",
     "SnapshotValue",

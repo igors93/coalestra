@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from coalestra import FreshnessPolicy, ResourceKey
+from coalestra import LEGACY_KEY_NORMALIZER, FreshnessPolicy, ResourceKey
 
 
 def test_resource_key_normalizes_identity() -> None:
-    key = ResourceKey(" Market ", " Price ", " btcusdt ")
+    key = ResourceKey(" Market ", " Price ", " btcusdt ", normalizer=LEGACY_KEY_NORMALIZER)
 
     assert key.namespace == "market"
     assert key.name == "price"
