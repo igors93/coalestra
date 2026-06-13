@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Collection
 from typing import Any
 
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SourcePayload
+from coalestra.resilience.policy import SourceResiliencePolicy
 
 DerivedSupportsFunction = Callable[[ResourceKey], bool]
 DependenciesFunction = Callable[[ResourceKey], Collection[ResourceKey]]
@@ -28,15 +29,21 @@ class CallableDerivedSource:
         dependencies: DependenciesFunction,
         deriver: DeriverFunction,
         timeout_seconds: float | None = None,
+        max_concurrency: int | None = None,
+        resilience_policy: SourceResiliencePolicy | None = None,
     ) -> None:
         normalized_name = name.strip()
         if not normalized_name:
             raise ValueError("source name cannot be empty")
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1 or None")
         self.name = normalized_name
         self.priority = int(priority)
         self.timeout_seconds = timeout_seconds
+        self.max_concurrency = None if max_concurrency is None else int(max_concurrency)
+        self.resilience_policy = resilience_policy
         self._supports = supports
         self._dependencies = dependencies
         self._deriver = deriver

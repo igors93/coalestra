@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from coalestra.cache.memory import AsyncMemoryCache
+from coalestra.cache.publisher import ResourcePublisher
+from coalestra.concurrency.capacity import CapacityController, CapacitySnapshot
 from coalestra.core.clock import SystemClock
 from coalestra.core.errors import (
     CircuitOpenError,
@@ -43,7 +45,11 @@ from coalestra.observability.events import NullEventSink
 from coalestra.observability.metrics import NullMetrics
 from coalestra.orchestration.policy import PolicyResolver
 from coalestra.orchestration.singleflight import SingleFlight
-from coalestra.resilience.circuit_breaker import CircuitBreaker
+from coalestra.resilience.circuit_breaker import CircuitBreaker, CircuitIdentity
+from coalestra.resilience.policy import (
+    ResiliencePolicyResolver,
+    SourceResiliencePolicy,
+)
 from coalestra.resilience.retry import RetryPolicy, run_with_retry
 
 if TYPE_CHECKING:
@@ -77,7 +83,6 @@ class _SourceAttempt:
 
 @dataclass
 class _ResolutionRuntime:
-    semaphore: asyncio.Semaphore
     memo: dict[ResourceKey, SnapshotValue[Any]] = field(default_factory=dict)
 
 
@@ -103,10 +108,14 @@ class SnapshotBuilder:
         single_flight: SingleFlight[ResourceKey, _ResolutionResult] | None = None,
         retry_policy: RetryPolicy | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        default_resilience: SourceResiliencePolicy | None = None,
+        source_resilience: Mapping[str, SourceResiliencePolicy] | None = None,
+        resilience_resolver: ResiliencePolicyResolver | None = None,
         clock: Clock | None = None,
         metrics: MetricsSink | None = None,
         events: EventSink | None = None,
         max_concurrency: int = 8,
+        source_concurrency: Mapping[str, int] | None = None,
     ) -> None:
         source_list = list(sources)
         if not source_list:
@@ -131,9 +140,37 @@ class SnapshotBuilder:
         self.single_flight = single_flight or SingleFlight()
         self.retry_policy = retry_policy or RetryPolicy()
         self.circuit_breaker = circuit_breaker or CircuitBreaker(clock=self.clock)
+        default_source_resilience = default_resilience or SourceResiliencePolicy(
+            retry=self.retry_policy,
+            circuit=self.circuit_breaker.default_policy,
+        )
+        self.resilience_resolver = resilience_resolver or ResiliencePolicyResolver(
+            default_source_resilience,
+            overrides=source_resilience,
+        )
         self.metrics = metrics or NullMetrics()
         self.events = events or NullEventSink()
-        self.max_concurrency = max_concurrency
+        self.max_concurrency = int(max_concurrency)
+        self.capacity = CapacityController(
+            global_limit=self.max_concurrency,
+            source_limits=source_concurrency,
+        )
+        for source in self.sources:
+            declared_limit = getattr(source, "max_concurrency", None)
+            if self.capacity.limit_for(source.name) is None:
+                self.capacity.register_source(source.name, declared_limit)
+        self.publisher = ResourcePublisher(
+            cache=self.cache,
+            clock=self.clock,
+            policy_resolver=self.policy_resolver,
+            metrics=self.metrics,
+            events=self.events,
+        )
+
+    async def capacity_snapshot(self) -> dict[str, CapacitySnapshot]:
+        """Return builder-wide and per-source capacity diagnostics."""
+
+        return await self.capacity.snapshot()
 
     async def build(
         self,
@@ -191,7 +228,7 @@ class SnapshotBuilder:
             metadata=metadata or {},
             snapshot_id=resolved_snapshot_id,
         )
-        runtime = _ResolutionRuntime(semaphore=asyncio.Semaphore(self.max_concurrency))
+        runtime = _ResolutionRuntime()
         return SnapshotSession(
             builder=self,
             context=context,
@@ -480,32 +517,55 @@ class SnapshotBuilder:
         context: FetchContext,
         runtime: _ResolutionRuntime,
     ) -> dict[ResourceKey, _SourceAttempt]:
+        resilience = self._resilience_for(source)
+
         async def fetch_one(key: ResourceKey) -> tuple[ResourceKey, _SourceAttempt]:
             started = self.clock.monotonic()
             try:
-                await self.circuit_breaker.before_call(source.name)
+                await self.circuit_breaker.before_call(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
                 payload, attempts = await run_with_retry(
-                    partial(self._fetch_once, source, key, context, runtime),
-                    policy=self.retry_policy,
+                    partial(self._fetch_once, source, key, context),
+                    policy=resilience.retry,
                     retryable=self._is_retryable,
                 )
-                await self.circuit_breaker.record_success(source.name)
+                await self._record_payload_circuit_outcome(
+                    source,
+                    key,
+                    payload,
+                    resilience,
+                )
                 return key, _SourceAttempt(
                     payload=payload,
                     attempts=attempts,
                     latency_ms=self._elapsed_ms(started),
                 )
+            except asyncio.CancelledError:
+                await self.circuit_breaker.record_abandoned(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
+                raise
             except CircuitOpenError as error:
+                self._record_circuit_open(source, key, error)
                 return key, _SourceAttempt(
                     error=error,
                     attempts=0,
                     latency_ms=self._elapsed_ms(started),
                 )
             except Exception as error:
-                await self.circuit_breaker.record_failure(source.name)
+                await self.circuit_breaker.record_failure(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
                 return key, _SourceAttempt(
                     error=error,
-                    attempts=self._attempt_count(error),
+                    attempts=self._attempt_count(error, resilience.retry),
                     latency_ms=self._elapsed_ms(started),
                 )
 
@@ -521,16 +581,61 @@ class SnapshotBuilder:
         runtime: _ResolutionRuntime,
     ) -> dict[ResourceKey, _SourceAttempt]:
         requested = tuple(dict.fromkeys(keys))
+        resilience = self._resilience_for(source)
         started = self.clock.monotonic()
+        results: dict[ResourceKey, _SourceAttempt] = {}
+
+        groups = self._circuit_groups(source, requested, resilience)
+        active_groups: list[tuple[ResourceKey, tuple[ResourceKey, ...]]] = []
+        allowed: set[ResourceKey] = set()
+        for representative, grouped_keys in groups:
+            try:
+                await self.circuit_breaker.before_call(
+                    source.name,
+                    key=representative,
+                    policy=resilience.circuit,
+                )
+                active_groups.append((representative, grouped_keys))
+                allowed.update(grouped_keys)
+            except CircuitOpenError as error:
+                self._record_circuit_open(source, representative, error)
+                for key in grouped_keys:
+                    results[key] = _SourceAttempt(
+                        error=error,
+                        attempts=0,
+                        latency_ms=self._elapsed_ms(started),
+                    )
+
+        active_keys = tuple(key for key in requested if key in allowed)
+        if not active_keys:
+            return results
+
         try:
-            await self.circuit_breaker.before_call(source.name)
             payloads, attempts = await run_with_retry(
-                partial(self._fetch_many_once, source, requested, context, runtime),
-                policy=self.retry_policy,
+                partial(self._fetch_many_once, source, active_keys, context),
+                policy=resilience.retry,
                 retryable=self._is_retryable,
             )
-            await self.circuit_breaker.record_success(source.name)
             latency_ms = self._elapsed_ms(started)
+            returned = set(payloads)
+            for representative, grouped_keys in active_groups:
+                has_fresh_value = any(
+                    key in returned and self._payload_is_fresh(key, payloads[key])
+                    for key in grouped_keys
+                )
+                if has_fresh_value:
+                    await self.circuit_breaker.record_success(
+                        source.name,
+                        key=representative,
+                        policy=resilience.circuit,
+                    )
+                else:
+                    await self.circuit_breaker.record_failure(
+                        source.name,
+                        key=representative,
+                        policy=resilience.circuit,
+                    )
+
             self.metrics.increment(
                 "source_batch_call_total",
                 status="success",
@@ -538,49 +643,53 @@ class SnapshotBuilder:
             )
             self.metrics.observe(
                 "source_batch_size",
-                float(len(requested)),
+                float(len(active_keys)),
                 source=source.name,
             )
-            return {
-                key: (
-                    _SourceAttempt(
+            for key in active_keys:
+                if key in payloads:
+                    results[key] = _SourceAttempt(
                         payload=payloads[key],
                         attempts=attempts,
                         latency_ms=latency_ms,
                     )
-                    if key in payloads
-                    else _SourceAttempt(
+                else:
+                    results[key] = _SourceAttempt(
                         error=SourceUnavailableError(
                             f"batch source {source.name} omitted resource {key}"
                         ),
                         attempts=attempts,
                         latency_ms=latency_ms,
                     )
+            return results
+        except asyncio.CancelledError:
+            for representative, _grouped_keys in active_groups:
+                await self.circuit_breaker.record_abandoned(
+                    source.name,
+                    key=representative,
+                    policy=resilience.circuit,
                 )
-                for key in requested
-            }
-        except CircuitOpenError as error:
-            latency_ms = self._elapsed_ms(started)
-            return {
-                key: _SourceAttempt(error=error, attempts=0, latency_ms=latency_ms)
-                for key in requested
-            }
+            raise
         except Exception as error:
-            await self.circuit_breaker.record_failure(source.name)
+            for representative, _grouped_keys in active_groups:
+                await self.circuit_breaker.record_failure(
+                    source.name,
+                    key=representative,
+                    policy=resilience.circuit,
+                )
             latency_ms = self._elapsed_ms(started)
             self.metrics.increment(
                 "source_batch_call_total",
                 status="failure",
                 source=source.name,
             )
-            return {
-                key: _SourceAttempt(
+            for key in active_keys:
+                results[key] = _SourceAttempt(
                     error=error,
-                    attempts=self._attempt_count(error),
+                    attempts=self._attempt_count(error, resilience.retry),
                     latency_ms=latency_ms,
                 )
-                for key in requested
-            }
+            return results
 
     async def _attempt_derived_source(
         self,
@@ -592,6 +701,8 @@ class SnapshotBuilder:
         ancestry: tuple[ResourceKey, ...],
         local_owned: frozenset[ResourceKey],
     ) -> dict[ResourceKey, _SourceAttempt]:
+        resilience = self._resilience_for(source)
+
         async def derive_one(key: ResourceKey) -> tuple[ResourceKey, _SourceAttempt]:
             started = self.clock.monotonic()
             path = (*ancestry, key)
@@ -626,7 +737,11 @@ class SnapshotBuilder:
                     resources=dependency_values,
                     errors={},
                 )
-                await self.circuit_breaker.before_call(source.name)
+                await self.circuit_breaker.before_call(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
                 payload, attempts = await run_with_retry(
                     partial(
                         self._derive_once,
@@ -634,18 +749,30 @@ class SnapshotBuilder:
                         key,
                         dependency_snapshot,
                         context,
-                        runtime,
                     ),
-                    policy=self.retry_policy,
+                    policy=resilience.retry,
                     retryable=self._is_retryable,
                 )
-                await self.circuit_breaker.record_success(source.name)
+                await self._record_payload_circuit_outcome(
+                    source,
+                    key,
+                    payload,
+                    resilience,
+                )
                 return key, _SourceAttempt(
                     payload=payload,
                     attempts=attempts,
                     latency_ms=self._elapsed_ms(started),
                 )
+            except asyncio.CancelledError:
+                await self.circuit_breaker.record_abandoned(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
+                raise
             except CircuitOpenError as error:
+                self._record_circuit_open(source, key, error)
                 return key, _SourceAttempt(
                     error=error,
                     attempts=0,
@@ -658,10 +785,14 @@ class SnapshotBuilder:
                     latency_ms=self._elapsed_ms(started),
                 )
             except Exception as error:
-                await self.circuit_breaker.record_failure(source.name)
+                await self.circuit_breaker.record_failure(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
                 return key, _SourceAttempt(
                     error=error,
-                    attempts=self._attempt_count(error),
+                    attempts=self._attempt_count(error, resilience.retry),
                     latency_ms=self._elapsed_ms(started),
                 )
 
@@ -673,23 +804,33 @@ class SnapshotBuilder:
         source: SnapshotSource,
         key: ResourceKey,
         context: FetchContext,
-        runtime: _ResolutionRuntime,
     ) -> SourcePayload[Any]:
         async def invoke() -> SourcePayload[Any]:
-            async with runtime.semaphore:
+            wait_started = self.clock.monotonic()
+            async with self.capacity.slot(source.name):
+                self.metrics.observe(
+                    "source_capacity_wait_ms",
+                    self._elapsed_ms(wait_started),
+                    source=source.name,
+                )
                 return self._coerce_payload(await source.fetch(key, context))
 
-        return await self._with_timeout(source, context, invoke(), resource=key)
+        return await self._with_timeout(source, context, invoke, resource=key)
 
     async def _fetch_many_once(
         self,
         source: BatchSnapshotSource,
         keys: tuple[ResourceKey, ...],
         context: FetchContext,
-        runtime: _ResolutionRuntime,
     ) -> Mapping[ResourceKey, SourcePayload[Any]]:
         async def invoke() -> Mapping[ResourceKey, SourcePayload[Any]]:
-            async with runtime.semaphore:
+            wait_started = self.clock.monotonic()
+            async with self.capacity.slot(source.name):
+                self.metrics.observe(
+                    "source_capacity_wait_ms",
+                    self._elapsed_ms(wait_started),
+                    source=source.name,
+                )
                 result = await source.fetch_many(keys, context)
                 if not isinstance(result, Mapping):
                     raise SourceProtocolError(
@@ -705,7 +846,7 @@ class SnapshotBuilder:
                     )
                 return {key: self._coerce_payload(value) for key, value in result.items()}
 
-        return await self._with_timeout(source, context, invoke(), resource=None)
+        return await self._with_timeout(source, context, invoke, resource=None)
 
     async def _derive_once(
         self,
@@ -713,27 +854,32 @@ class SnapshotBuilder:
         key: ResourceKey,
         dependencies: Snapshot,
         context: FetchContext,
-        runtime: _ResolutionRuntime,
     ) -> SourcePayload[Any]:
         async def invoke() -> SourcePayload[Any]:
-            async with runtime.semaphore:
+            wait_started = self.clock.monotonic()
+            async with self.capacity.slot(source.name):
+                self.metrics.observe(
+                    "source_capacity_wait_ms",
+                    self._elapsed_ms(wait_started),
+                    source=source.name,
+                )
                 return self._coerce_payload(await source.derive(key, dependencies, context))
 
-        return await self._with_timeout(source, context, invoke(), resource=key)
+        return await self._with_timeout(source, context, invoke, resource=key)
 
     async def _with_timeout(
         self,
         source: SourceBase,
         context: FetchContext,
-        operation: Awaitable[T],
+        operation: Callable[[], Awaitable[T]],
         *,
         resource: ResourceKey | None,
     ) -> T:
         timeout = self._effective_timeout(source, context)
         try:
             if timeout is None:
-                return await operation
-            return await asyncio.wait_for(operation, timeout=timeout)
+                return await operation()
+            return await asyncio.wait_for(operation(), timeout=timeout)
         except TimeoutError as error:
             target = f" while resolving {resource}" if resource is not None else ""
             raise SourceTimeoutError(f"source {source.name} timed out{target}") from error
@@ -801,6 +947,16 @@ class SnapshotBuilder:
             raise ValueError("source name cannot be empty")
         if not callable(getattr(source, "supports", None)):
             raise TypeError(f"source {source.name} must define supports()")
+        max_concurrency = getattr(source, "max_concurrency", None)
+        if max_concurrency is not None and int(max_concurrency) < 1:
+            raise ValueError(f"source {source.name} max_concurrency must be at least 1")
+        declared_resilience = getattr(source, "resilience_policy", None)
+        if declared_resilience is not None and not isinstance(
+            declared_resilience, SourceResiliencePolicy
+        ):
+            raise TypeError(
+                f"source {source.name} resilience_policy must be SourceResiliencePolicy or None"
+            )
         kind = cls._source_kind(source)
         if kind == "single" and not callable(getattr(source, "fetch", None)):
             raise TypeError(
@@ -820,8 +976,79 @@ class SnapshotBuilder:
             ),
         ) and not isinstance(error, CircuitOpenError)
 
-    def _attempt_count(self, error: Exception) -> int:
-        return self.retry_policy.max_attempts if self._is_retryable(error) else 1
+    def _resilience_for(self, source: SourceBase) -> SourceResiliencePolicy:
+        declared = getattr(source, "resilience_policy", None)
+        if declared is not None and not isinstance(declared, SourceResiliencePolicy):
+            raise TypeError(
+                f"source {source.name} resilience_policy must be SourceResiliencePolicy or None"
+            )
+        return self.resilience_resolver.resolve(source.name, declared=declared)
+
+    def _circuit_groups(
+        self,
+        source: SourceBase,
+        keys: Collection[ResourceKey],
+        resilience: SourceResiliencePolicy,
+    ) -> list[tuple[ResourceKey, tuple[ResourceKey, ...]]]:
+        grouped: dict[CircuitIdentity, list[ResourceKey]] = {}
+        for key in keys:
+            identity = self.circuit_breaker.identity_for(
+                source.name,
+                key=key,
+                scope=resilience.circuit.scope,
+            )
+            grouped.setdefault(identity, []).append(key)
+        return [(items[0], tuple(items)) for items in grouped.values()]
+
+    def _payload_is_fresh(
+        self,
+        key: ResourceKey,
+        payload: SourcePayload[Any],
+    ) -> bool:
+        observed_at = payload.observed_at
+        if observed_at is None:
+            return True
+        age_seconds = max(0.0, self.clock.now() - observed_at)
+        return age_seconds <= self.policy_resolver.resolve(key).ttl_seconds
+
+    async def _record_payload_circuit_outcome(
+        self,
+        source: SourceBase,
+        key: ResourceKey,
+        payload: SourcePayload[Any],
+        resilience: SourceResiliencePolicy,
+    ) -> None:
+        recorder = (
+            self.circuit_breaker.record_success
+            if self._payload_is_fresh(key, payload)
+            else self.circuit_breaker.record_failure
+        )
+        await recorder(
+            source.name,
+            key=key,
+            policy=resilience.circuit,
+        )
+
+    def _record_circuit_open(
+        self,
+        source: SourceBase,
+        key: ResourceKey,
+        error: CircuitOpenError,
+    ) -> None:
+        self.metrics.increment(
+            "source_fetch_total",
+            status="circuit_open",
+            source=source.name,
+        )
+        self.events.emit(
+            "source_circuit_open",
+            source=source.name,
+            resource=str(key),
+            error=str(error),
+        )
+
+    def _attempt_count(self, error: Exception, retry_policy: RetryPolicy) -> int:
+        return retry_policy.max_attempts if self._is_retryable(error) else 1
 
     def _elapsed_ms(self, started: float) -> float:
         return max(0.0, (self.clock.monotonic() - started) * 1000)

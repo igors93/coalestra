@@ -2,15 +2,111 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Coroutine, Iterable, Mapping
+from collections.abc import Collection, Coroutine, Iterable, Mapping
 from concurrent.futures import Future
 from typing import Any, TypeVar
 
+from coalestra.cache.publisher import PublishResult, ResourcePublisher, ResourceUpdate
 from coalestra.core.models import ResourceKey, Snapshot
 from coalestra.orchestration.builder import SnapshotBuilder
 from coalestra.orchestration.session import SnapshotSession
 
 T = TypeVar("T")
+
+
+class SyncResourcePublisher:
+    """Thread-safe synchronous and non-blocking facade over ``ResourcePublisher``."""
+
+    def __init__(self, owner: SyncSnapshotBuilder, publisher: ResourcePublisher) -> None:
+        self._owner = owner
+        self._publisher = publisher
+
+    def publish(
+        self,
+        key: ResourceKey,
+        value: Any,
+        *,
+        source: str,
+        observed_at: float | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> PublishResult:
+        return self._owner._submit(
+            self._publisher.publish(
+                key,
+                value,
+                source=source,
+                observed_at=observed_at,
+                metadata=metadata,
+                force=force,
+                replace_equal=replace_equal,
+            )
+        )
+
+    def submit_publish(
+        self,
+        key: ResourceKey,
+        value: Any,
+        *,
+        source: str,
+        observed_at: float | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> Future[PublishResult]:
+        return self._owner._schedule(
+            self._publisher.publish(
+                key,
+                value,
+                source=source,
+                observed_at=observed_at,
+                metadata=metadata,
+                force=force,
+                replace_equal=replace_equal,
+            )
+        )
+
+    def publish_update(
+        self,
+        update: ResourceUpdate[Any],
+        *,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> PublishResult:
+        return self._owner._submit(
+            self._publisher.publish_update(
+                update,
+                force=force,
+                replace_equal=replace_equal,
+            )
+        )
+
+    def publish_many(
+        self,
+        updates: Collection[ResourceUpdate[Any]],
+        *,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> Mapping[ResourceKey, PublishResult]:
+        return self._owner._submit(
+            self._publisher.publish_many(
+                updates,
+                force=force,
+                replace_equal=replace_equal,
+            )
+        )
+
+    def invalidate(self, key: ResourceKey, *, reason: str = "") -> None:
+        self._owner._submit(self._publisher.invalidate(key, reason=reason))
+
+    def invalidate_many(
+        self,
+        keys: Collection[ResourceKey],
+        *,
+        reason: str = "",
+    ) -> None:
+        self._owner._submit(self._publisher.invalidate_many(keys, reason=reason))
 
 
 class SyncSnapshotSession:
@@ -89,6 +185,7 @@ class SyncSnapshotBuilder:
         )
         self._thread.start()
         self._ready.wait()
+        self.publisher = SyncResourcePublisher(self, builder.publisher)
 
     def build(
         self,
@@ -142,9 +239,13 @@ class SyncSnapshotBuilder:
         self.close()
 
     def _submit(self, coroutine: Coroutine[Any, Any, T]) -> T:
-        self._ensure_open()
-        future: Future[T] = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
-        return future.result()
+        return self._schedule(coroutine).result()
+
+    def _schedule(self, coroutine: Coroutine[Any, Any, T]) -> Future[T]:
+        if self._closed:
+            coroutine.close()
+            raise RuntimeError("SyncSnapshotBuilder is closed")
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
     async def _create_session(
         self,

@@ -67,7 +67,27 @@ class DerivedSource(SourceBase, Protocol):
     ) -> SourcePayload[Any]: ...
 
 
+@runtime_checkable
+class ConcurrencyLimitedSource(Protocol):
+    """Optional source capability declaring an independent concurrency ceiling."""
+
+    max_concurrency: int | None
+
+
+@runtime_checkable
+class ResilienceConfiguredSource(Protocol):
+    """Optional source capability declaring source-local resilience behavior."""
+
+    resilience_policy: Any
+
+
 Source = SnapshotSource | BatchSnapshotSource | DerivedSource
+
+
+class FreshnessPolicyProvider(Protocol):
+    """Resolve freshness semantics for a resource."""
+
+    def resolve(self, key: ResourceKey) -> FreshnessPolicy: ...
 
 
 class AsyncCache(Protocol):

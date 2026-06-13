@@ -2,46 +2,46 @@
 
 ## Goal
 
-Coalestra creates one immutable read model for one unit of work while keeping transport and domain concerns outside the core.
+Coalestra creates an immutable read model for one unit of work while keeping transport and domain decisions outside the core.
 
 ## Source model
 
-Every source exposes a name, priority, optional timeout, and `supports(ResourceKey)` predicate. Three acquisition contracts can coexist in one builder:
+Every source exposes a name, priority, optional timeout, and `supports(ResourceKey)` predicate. Three acquisition contracts can coexist:
 
-### `SnapshotSource`
+- `SnapshotSource`: resolves one key through `fetch(key, context)`.
+- `BatchSnapshotSource`: resolves a collection through `fetch_many(keys, context)`; partial mappings are valid.
+- `DerivedSource`: declares `dependencies(key)` and computes a value through `derive(key, snapshot, context)`.
 
-Resolves one key through `fetch(key, context)`.
+Capability selection is deterministic: derived, then batch, then single. Normal integrations should expose one capability per source object.
 
-### `BatchSnapshotSource`
+A source may additionally declare:
 
-Resolves a collection through `fetch_many(keys, context)`. Partial results are valid. Missing keys continue through lower-priority sources.
+- `max_concurrency`: its independent capacity ceiling;
+- `resilience_policy`: its retry and circuit behavior.
 
-### `DerivedSource`
-
-Declares `dependencies(key)` and computes the requested value through `derive(key, dependency_snapshot, context)`.
-
-Capability selection is deterministic: derived, then batch, then single. Normal applications should expose one capability per source object.
+Both declarations are optional and do not alter the base source protocols.
 
 ## Resolution pipeline
 
-For a set of requested keys, the builder:
+For requested keys, the builder:
 
 1. Reuses values pinned in the current session runtime.
 2. Resolves freshness policy and checks the cache.
 3. Reserves unresolved keys independently in `SingleFlight`.
 4. Gives the first caller ownership of newly reserved keys.
-5. Walks compatible sources in descending priority.
-6. Groups all unresolved compatible keys for a batch source.
-7. Resolves declared dependencies recursively for a derived source.
-8. Applies timeout, retry, and circuit-breaker rules.
-9. Accepts fresh values and caches them.
-10. Keeps the newest acceptable stale candidate while trying lower sources.
-11. Returns stale only when policy allows and fresh resolution failed.
-12. Returns immutable values and errors to the caller.
+5. Walks sources in descending priority.
+6. Groups unresolved compatible keys for batch sources.
+7. Resolves dependencies recursively for derived sources.
+8. Applies circuit admission, deadline, timeout, capacity, and retry rules.
+9. Records a circuit outcome using the configured failure scope.
+10. Accepts fresh values and writes them to the cache.
+11. Keeps the newest acceptable stale candidate while trying lower sources.
+12. Returns stale only when policy permits and no fresh source succeeds.
+13. Returns immutable values and errors.
 
-## Per-key single-flight with batches
+## Single-flight and cancellation
 
-Batching and coalescing operate together. `SingleFlight.run_many()` reserves each key independently:
+`SingleFlight.run_many()` reserves each key independently, allowing overlapping batches to share work:
 
 ```text
 request 1: A B
@@ -52,34 +52,69 @@ owner batch 2:     C
 joined key:        B
 ```
 
-This prevents duplicate work for overlapping requests without requiring identical key sets.
-
-A cancelled waiter does not cancel shared producer work.
+A cancelled waiter does not cancel shared producer work. The producer retains its capacity slot until the actual source operation completes or times out. This prevents one consumer from interrupting work still required by another consumer.
 
 ## Snapshot sessions
 
-`SnapshotSession` supports workflows where later resource requirements depend on earlier results.
-
-A session owns:
+A `SnapshotSession` supports workflows where later requirements depend on earlier results. It owns:
 
 - one `snapshot_id`;
 - one wall-clock creation timestamp;
 - one monotonic deadline;
-- one concurrency semaphore;
-- an internal memo of values acquired directly or as dependencies;
+- an internal memo of successful values;
 - explicit resources and errors requested by the consumer.
 
-Successful values are pinned for the session, even if their cache TTL expires between stages. Dependency resources remain internal until explicitly requested, preserving the public snapshot contract.
+Capacity is not session-local. Every session and direct build shares the builder's capacity controller. This prevents simultaneous sessions from multiplying the configured concurrency ceiling.
 
-`retry_errors=True` allows explicitly requested failed keys to be attempted again without changing session identity or deadline.
+Successful values are pinned even if their normal cache TTL expires between stages. Dependency resources remain internal until explicitly requested. `retry_errors=True` retries selected failed keys without changing session identity or deadline.
+
+## Capacity model
+
+The builder owns one global `CapacityLimiter` and zero or more source limiters.
+
+Source capacity is acquired before global capacity. A heavily queued source therefore does not consume every global slot while it waits behind its own smaller limit.
+
+```text
+source limiter
+      |
+      v
+global limiter
+      |
+      v
+source operation
+```
+
+Capacity applies to the actual fetch, batch, or derivation operation. Retry delays do not hold slots. Batch size does not change slot cost.
+
+`CapacityController.snapshot()` exposes current limits, in-use slots, and waiters.
+
+## Circuit identity model
+
+A circuit is identified by the source plus a configurable discriminator:
+
+- `SOURCE`: no resource discriminator;
+- `NAMESPACE`: `ResourceKey.namespace`;
+- `SUBJECT`: `ResourceKey.subject`;
+- `RESOURCE`: the complete key string.
+
+For batch sources, requested keys are grouped by circuit identity before the call. Open identities are removed from the batch while other identities continue. A group succeeds when it returns at least one fresh value; a group containing only omitted or stale values records a failure.
+
+A half-open circuit allows one probe. If that probe is abandoned by cancellation, the circuit returns to open state instead of remaining permanently locked in half-open.
+
+## Source-specific resilience
+
+`SourceResiliencePolicy` combines:
+
+- `RetryPolicy`;
+- `CircuitBreakerPolicy`.
+
+Policies may be declared by a source, configured by source name in the builder, or resolved dynamically. Builder-level overrides have precedence over source declarations.
+
+Retries represent one logical circuit attempt. A source failure is recorded only after its configured retries are exhausted.
 
 ## Derived resource graph
 
-A derived source receives an immutable snapshot containing its dependencies. Dependencies can be resolved by any source type and can form multi-level chains.
-
-Coalestra tracks the ancestry path of each derivation. A direct or indirect cycle produces `DependencyCycleError`; the failed derived source is then treated like any other failed source, allowing lower-priority fallback.
-
-Example:
+A derived source receives an immutable snapshot containing its dependencies. Dependencies can be resolved by any source type and can form multi-level graphs.
 
 ```text
 symbol rules(BTC)
@@ -88,21 +123,40 @@ symbol rules(BTC)
 exchange info ---- remote API
 ```
 
-Several derived keys that depend on the same base key share one acquisition through memoization and single-flight.
+Several derived keys sharing a base key share one acquisition through memoization and single-flight. Direct and indirect cycles raise `DependencyCycleError`.
 
-## Consistency model
+## Direct publication
 
-Coalestra provides acquisition consistency, not a distributed transaction. Resources may have different `observed_at` timestamps because independent reads occur concurrently. Consumers may inspect age and provenance and apply stronger domain rules.
+`ResourcePublisher` writes event-driven state into the same cache read by the builder.
 
-## Concurrency and deadlines
+Each publication creates a normal `SnapshotValue` with provenance, observation time, current fetch time, freshness, and metadata. Per-key striped locks serialize conflicting publications without retaining an unbounded lock registry.
 
-Each build creates one session internally. A session has one semaphore shared by all stages and recursive dependency resolution. Batch operations consume one concurrency slot, independent single-resource calls consume one slot each, and derivation execution consumes one slot after dependencies are available.
+The default monotonic rule is:
 
-The deadline is created once per build or session. Timeout calculations use a monotonic clock.
+```text
+newer timestamp  -> publish
+equal timestamp  -> ignore duplicate
+older timestamp  -> ignore older update
+force=True       -> publish regardless
+```
+
+Publication does not mutate existing session memos. This preserves session consistency. A new build or session reads the updated cache.
+
+Invalidation removes a resource from the shared cache, causing normal source resolution on the next request.
 
 ## Cache model
 
-The cache stores both acquired and derived `SnapshotValue` instances. A session additionally pins successful values in an internal memo to avoid re-reading or recomputing them in later stages.
+The cache stores acquired, derived, and published `SnapshotValue` instances. A session additionally pins values in its private memo.
+
+The publisher requests cached values with an unbounded freshness window only to compare observation timestamps. Normal builder reads continue to use each resource's configured `FreshnessPolicy`.
+
+## Consistency model
+
+Coalestra provides acquisition consistency, not a distributed transaction. Independent resources may have different `observed_at` timestamps. Consumers can inspect age and provenance and apply stronger domain constraints.
+
+## Deadlines and timeouts
+
+A deadline is created once per build or session using a monotonic clock. Source timeout covers waiting for capacity and executing the source call. This ensures queued work cannot outlive the consumer's acquisition deadline.
 
 ## Extension points
 
@@ -114,5 +168,6 @@ The cache stores both acquired and derived `SnapshotValue` instances. A session 
 - `EventSink`
 - `MetricsSink`
 - `PolicyResolver`
+- `ResiliencePolicyResolver`
 
-Transport and application adapters should remain outside the core package.
+Transport and application adapters remain outside the core package.

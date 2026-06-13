@@ -54,3 +54,25 @@ def test_sync_facade_rejects_calls_after_close() -> None:
         assert "closed" in str(error)
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("closed builder accepted a new call")
+
+
+def test_sync_publisher_rejects_calls_after_builder_close() -> None:
+    builder = SnapshotBuilder(
+        [
+            CallableSource(
+                name="source",
+                priority=1,
+                supports=lambda _key: True,
+                fetcher=lambda _key, _context: 99,
+            )
+        ]
+    )
+    sync_builder = SyncSnapshotBuilder(builder)
+    sync_builder.close()
+
+    try:
+        sync_builder.publisher.publish(KEY, 100, source="stream")
+    except RuntimeError as error:
+        assert "closed" in str(error)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("closed publisher accepted a new call")

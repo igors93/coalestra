@@ -1,25 +1,26 @@
 # Integração com o Alphora
 
-A Coalestra deve substituir somente aquisição e composição de leituras. Estratégia, risco, reconciliação decisória e envio de ordens permanecem no Alphora.
+A Coalestra deve substituir aquisição e composição de leituras. Estratégia, risco, reconciliação decisória e envio de ordens permanecem no Alphora.
 
 ## Modelo recomendado
 
-Use uma `SnapshotSession` por ciclo do Governor:
+Use um único `SyncSnapshotBuilder` durante toda a execução e uma `SnapshotSession` por ciclo do Governor:
 
 ```text
+startup
+    +-- cria fontes
+    +-- cria SnapshotBuilder
+    +-- cria SyncSnapshotBuilder
+
 ciclo do Governor
-    |
-    +-- estágio base
-    |     conta, posições e mercado leve
-    |
-    +-- seleção
-    |     posições abertas, scheduler, dirty e fast lane
-    |
-    +-- estágio pesado
-          mark price, ordens e regras somente para símbolos selecionados
+    +-- abre sessão
+    +-- estágio base: conta, posições e mercado leve
+    +-- seleção: posições abertas, scheduler, dirty e fast lane
+    +-- estágio pesado: mark price, ordens e regras dos selecionados
+    +-- fecha sessão
 ```
 
-A sessão garante o mesmo `snapshot_id`, deadline e valores já adquiridos nos dois estágios.
+O limite global pertence ao builder e é compartilhado por todos os ciclos, callbacks e sessões. Isso impede que ciclos concorrentes multipliquem a pressão sobre a Binance ou sobre pools de threads.
 
 ## Vocabulário sugerido
 
@@ -55,39 +56,152 @@ def exchange_rules(symbol: str) -> ResourceKey:
     return ResourceKey("exchange", "rules", symbol)
 ```
 
+## Configuração de capacidade
+
+Uma configuração inicial adequada para medir o Alphora:
+
+```python
+builder = SnapshotBuilder(
+    sources=sources,
+    max_concurrency=8,
+    source_concurrency={
+        "binance-rest": 4,
+        "market-stream": 16,
+        "user-data-stream": 16,
+        "alphora-symbol-rules": 4,
+        "alphora-position-view": 4,
+    },
+)
+```
+
+Os limites de stream podem ser maiores porque a leitura é local e rápida. O limite REST deve ser pequeno e medido com latência p95 e peso real dos endpoints.
+
+`source_concurrency` deve ser usado para configuração operacional. O `max_concurrency` declarado no adaptador pode servir como padrão reutilizável.
+
+## Políticas de resiliência sugeridas
+
+### MarketDataHub
+
+```python
+market_stream_policy = SourceResiliencePolicy(
+    retry=RetryPolicy(max_attempts=1),
+    circuit=CircuitBreakerPolicy(
+        scope=CircuitScope.SUBJECT,
+        failure_threshold=2,
+        recovery_timeout_seconds=2.0,
+    ),
+)
+```
+
+Use `SUBJECT` para que dados stale ou ausentes de `BTCUSDT` não desativem o stream para `ETHUSDT`.
+
+### User Data Stream
+
+Use `SUBJECT` para posições e ordens por símbolo. Para o resumo global da conta, use `RESOURCE` ou uma fonte separada com circuito próprio.
+
+### Binance REST
+
+```python
+rest_policy = SourceResiliencePolicy(
+    retry=RetryPolicy(
+        max_attempts=2,
+        base_delay_seconds=0.05,
+        max_delay_seconds=0.2,
+    ),
+    circuit=CircuitBreakerPolicy(
+        scope=CircuitScope.NAMESPACE,
+        failure_threshold=3,
+        recovery_timeout_seconds=5.0,
+    ),
+)
+```
+
+`NAMESPACE` permite separar falhas de mercado, conta e ordens sem criar um circuito para cada chave. Endpoints com comportamento muito diferente podem ser representados por fontes REST separadas.
+
+## Publicação do MarketDataHub
+
+O callback do WebSocket pode publicar o estado de mercado sem bloquear a thread do produtor:
+
+```python
+def on_market_snapshot(snapshot) -> None:
+    coalestra_provider.publisher.submit_publish(
+        market_state(snapshot.symbol),
+        snapshot,
+        source="market-stream",
+        observed_at=snapshot.received_at,
+        metadata={
+            "event_time": snapshot.event_time,
+            "bid": str(snapshot.bid_price),
+            "ask": str(snapshot.ask_price),
+        },
+    )
+```
+
+O `observed_at` deve representar o instante real do dado, não o momento em que o Governor o leu.
+
+## Publicação do User Data Stream
+
+Após classificar e converter o evento:
+
+```python
+def on_position_update(symbol: str, position_value, event_time: float) -> None:
+    coalestra_provider.publisher.submit_publish(
+        position(symbol),
+        position_value,
+        source="user-data-stream",
+        observed_at=event_time,
+    )
+
+
+def on_orders_update(symbol: str, orders, event_time: float) -> None:
+    coalestra_provider.publisher.submit_publish(
+        open_orders(symbol),
+        orders,
+        source="user-data-stream",
+        observed_at=event_time,
+    )
+```
+
+Eventos atrasados são ignorados automaticamente. Eventos duplicados com o mesmo timestamp também são ignorados. Durante reconciliação REST, use `force=True` somente quando a resposta autoritativa deve substituir o cache independentemente da ordem temporal recebida.
+
+Quando houver gap de stream ou estado incompleto:
+
+```python
+coalestra_provider.publisher.invalidate(
+    position(symbol),
+    reason="user-stream-gap",
+)
+```
+
+A próxima resolução usará a cadeia normal de fontes e poderá cair para REST.
+
 ## Fontes em lote
 
-Use `BatchSnapshotSource` quando uma única leitura consegue atender várias chaves:
+Use `BatchSnapshotSource` quando uma operação atende várias chaves:
 
-- leitura de vários preços mantidos pelo `MarketDataHub`;
-- endpoint que devolve mark prices de todos os símbolos;
+- leitura local de vários símbolos do `MarketDataHub`;
+- endpoint ou cache com vários mark prices;
 - consulta de todas as posições;
 - consulta de ordens para vários símbolos;
-- leitura de um cache compartilhado com várias entradas.
+- leitura de várias entradas de um cache operacional.
 
-Uma fonte em lote pode retornar apenas parte das chaves. As ausentes seguem automaticamente para a próxima fonte, normalmente REST.
+Uma fonte em lote pode retornar parte das chaves. As ausentes seguem para a próxima fonte. Com circuito `SUBJECT`, apenas símbolos cujo grupo falhou deixam de entrar nos próximos lotes.
 
 ## Recursos derivados
 
-Dois recursos importantes não devem gerar chamadas externas por símbolo:
+Não gere chamadas externas por símbolo para dados que já existem em uma resposta global:
 
 ```text
 ALL_POSITIONS
     +-- POSITION(BTCUSDT)
     +-- POSITION(ETHUSDT)
-    +-- POSITION(SOLUSDT)
 
 EXCHANGE_INFO
     +-- EXCHANGE_RULES(BTCUSDT)
     +-- EXCHANGE_RULES(ETHUSDT)
-    +-- EXCHANGE_RULES(SOLUSDT)
 ```
 
-Exemplo de regras derivadas:
-
 ```python
-from coalestra import CallableDerivedSource
-
 rules_source = CallableDerivedSource(
     name="alphora-symbol-rules",
     priority=100,
@@ -97,21 +211,7 @@ rules_source = CallableDerivedSource(
         snapshot.value(EXCHANGE_INFO, dict),
         key.subject,
     ),
-)
-```
-
-Exemplo de posição derivada:
-
-```python
-position_source = CallableDerivedSource(
-    name="alphora-position-view",
-    priority=100,
-    supports=lambda key: key.namespace == "account" and key.name == "position",
-    dependencies=lambda _key: (ALL_POSITIONS,),
-    deriver=lambda key, snapshot, _context: extract_position(
-        snapshot.value(ALL_POSITIONS, list),
-        key.subject,
-    ),
+    max_concurrency=4,
 )
 ```
 
@@ -146,11 +246,13 @@ with coalestra_provider.session(
     cycle_context.operational_snapshot = operational_snapshot
 ```
 
+Uma publicação recebida depois que uma chave foi resolvida não altera o valor já fixado na sessão atual. Ela será observada no próximo ciclo. Isso evita que partes diferentes de uma decisão usem versões diferentes do mesmo recurso.
+
 ## Pontos de integração
 
 ### Startup
 
-Crie um único `SyncSnapshotBuilder` junto com `MarketDataHub`, `UserDataStreamHub` e o cliente Binance. Não recrie o provider a cada ciclo.
+Crie o provider junto com `MarketDataHub`, `UserDataStreamHub` e o cliente Binance. Feche o `SyncSnapshotBuilder` no shutdown.
 
 ### `CycleContext`
 
@@ -162,15 +264,15 @@ operational_snapshot: Snapshot | None = None
 
 ### Avaliação leve
 
-Leia `market_state(symbol)` da sessão em vez de pedir novo snapshot ao `MarketDataRouter`.
+Leia `market_state(symbol)` da sessão em vez de pedir um novo snapshot ao `MarketDataRouter`.
 
 ### Avaliação pesada
 
-Mapeie as chaves da Coalestra para o `HeavyMarketSnapshot`. Não faça novas leituras dentro do mapper.
+Mapeie as chaves da Coalestra para `HeavyMarketSnapshot`. O mapper não deve realizar I/O.
 
 ### Consolidação
 
-Depois da comparação shadow:
+Após comparação shadow:
 
 1. remover cache de conta do `MarketDataRouter`;
 2. remover cache de exchange info do `MarketDataRouter`;
@@ -181,21 +283,23 @@ Depois da comparação shadow:
 ## Migração
 
 1. **Shadow:** construir a sessão e comparar com o caminho atual.
-2. **Mercado e regras:** adotar market state e exchange rules derivadas.
-3. **Posições:** adotar `ALL_POSITIONS` e posições derivadas.
-4. **Ordens e conta:** adotar fontes de stream/cache com REST como fallback.
-5. **Remoção:** retirar caches e aquisições duplicadas do Alphora.
+2. **Publicação de mercado:** alimentar a Coalestra pelo MarketDataHub.
+3. **Mercado e regras:** adotar market state e regras derivadas.
+4. **Posições:** publicar User Data Stream e adotar `ALL_POSITIONS`/posições derivadas.
+5. **Ordens e conta:** publicar cache privado com REST como fallback.
+6. **Remoção:** retirar caches e aquisições duplicadas.
 
 ## Métricas mínimas
 
-- chamadas individuais por ciclo;
-- chamadas em lote por ciclo;
+- concorrência global em uso e em espera;
+- concorrência por fonte em uso e em espera;
+- tempo esperando capacidade por fonte;
+- circuitos abertos por escopo;
+- tentativas por fonte;
+- publicações aceitas, antigas e duplicadas;
+- invalidações;
+- chamadas individuais e em lote;
 - tamanho médio dos lotes;
-- recursos derivados;
-- dependências compartilhadas;
-- cache hits;
-- single-flight joins;
+- cache hits e single-flight joins;
 - stale fallbacks;
-- duração do estágio base;
-- duração do estágio pesado;
-- duração total da sessão.
+- duração do estágio base, estágio pesado e sessão completa.

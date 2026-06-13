@@ -13,9 +13,10 @@ if TYPE_CHECKING:
 class SnapshotSession:
     """Incrementally builds one logically consistent snapshot.
 
-    A session keeps one snapshot identity, creation time, deadline, acquisition memo and concurrency
-    budget across every ``resolve`` call. Values resolved in an earlier stage are pinned for the
-    remainder of the session, even if their normal cache TTL later expires.
+    A session keeps one snapshot identity, creation time, deadline, and acquisition memo across
+    every ``resolve`` call. Capacity is owned by the long-lived builder and shared by all sessions.
+    Values resolved in an earlier stage are pinned for the remainder of the session, even if their
+    normal cache TTL later expires.
     """
 
     def __init__(

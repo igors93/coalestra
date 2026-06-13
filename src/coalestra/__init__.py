@@ -1,18 +1,28 @@
 """Coalestra public API."""
 
 from coalestra.adapters import CallableBatchSource, CallableDerivedSource, CallableSource
-from coalestra.cache import AsyncMemoryCache
+from coalestra.cache import (
+    AsyncMemoryCache,
+    PublishResult,
+    PublishStatus,
+    ResourcePublisher,
+    ResourceUpdate,
+)
+from coalestra.concurrency import CapacityController, CapacityLimiter, CapacitySnapshot
 from coalestra.core import (
     AsyncCache,
     BatchSnapshotSource,
     CacheLookup,
     CircuitOpenError,
     CoalestraError,
+    ConcurrencyLimitedSource,
     DependencyCycleError,
     DependencyResolutionError,
     DerivedSource,
     FetchContext,
     FreshnessPolicy,
+    FreshnessPolicyProvider,
+    ResilienceConfiguredSource,
     ResourceKey,
     ResourceResolutionError,
     SessionClosedError,
@@ -33,10 +43,20 @@ from coalestra.observability import (
     NullMetrics,
 )
 from coalestra.orchestration import PolicyResolver, SnapshotBuilder, SnapshotSession
-from coalestra.resilience import CircuitBreaker, CircuitState, RetryPolicy
-from coalestra.sync import SyncSnapshotBuilder, SyncSnapshotSession
+from coalestra.resilience import (
+    CircuitBreaker,
+    CircuitBreakerPolicy,
+    CircuitIdentity,
+    CircuitScope,
+    CircuitSnapshot,
+    CircuitState,
+    ResiliencePolicyResolver,
+    RetryPolicy,
+    SourceResiliencePolicy,
+)
+from coalestra.sync import SyncResourcePublisher, SyncSnapshotBuilder, SyncSnapshotSession
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AsyncCache",
@@ -46,22 +66,37 @@ __all__ = [
     "CallableBatchSource",
     "CallableDerivedSource",
     "CallableSource",
+    "CapacityController",
+    "CapacityLimiter",
+    "CapacitySnapshot",
     "CircuitBreaker",
+    "CircuitBreakerPolicy",
+    "CircuitIdentity",
     "CircuitOpenError",
+    "CircuitScope",
+    "CircuitSnapshot",
     "CircuitState",
     "CoalestraError",
+    "ConcurrencyLimitedSource",
     "DependencyCycleError",
     "DependencyResolutionError",
     "DerivedSource",
     "FetchContext",
     "FreshnessPolicy",
+    "FreshnessPolicyProvider",
     "InMemoryMetrics",
     "LoggingEventSink",
     "NullEventSink",
     "NullMetrics",
     "PolicyResolver",
+    "PublishResult",
+    "PublishStatus",
+    "ResilienceConfiguredSource",
+    "ResiliencePolicyResolver",
     "ResourceKey",
+    "ResourcePublisher",
     "ResourceResolutionError",
+    "ResourceUpdate",
     "RetryPolicy",
     "SessionClosedError",
     "Snapshot",
@@ -73,8 +108,10 @@ __all__ = [
     "SourceFailure",
     "SourcePayload",
     "SourceProtocolError",
+    "SourceResiliencePolicy",
     "SourceTimeoutError",
     "SourceUnavailableError",
+    "SyncResourcePublisher",
     "SyncSnapshotBuilder",
     "SyncSnapshotSession",
     "__version__",
