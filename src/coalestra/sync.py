@@ -7,7 +7,9 @@ from concurrent.futures import Future
 from typing import Any, TypeVar
 
 from coalestra.cache.publisher import PublishResult, ResourcePublisher, ResourceUpdate
+from coalestra.core.health import BuilderHealth
 from coalestra.core.models import ResourceKey, Snapshot
+from coalestra.core.request import SnapshotRequest
 from coalestra.orchestration.builder import SnapshotBuilder
 from coalestra.orchestration.session import SnapshotSession
 
@@ -145,6 +147,17 @@ class SyncSnapshotSession:
             )
         )
 
+    def resolve_request(
+        self,
+        request: SnapshotRequest,
+        *,
+        retry_errors: bool = False,
+    ) -> Snapshot:
+        self._ensure_open()
+        return self._owner._submit(
+            self._session.resolve_request(request, retry_errors=retry_errors)
+        )
+
     def snapshot(self) -> Snapshot:
         self._ensure_open()
         return self._owner._submit(self._snapshot_async())
@@ -173,8 +186,18 @@ class SyncSnapshotSession:
 class SyncSnapshotBuilder:
     """Thread-backed synchronous facade that preserves one event loop across calls."""
 
-    def __init__(self, builder: SnapshotBuilder) -> None:
+    def __init__(
+        self,
+        builder: SnapshotBuilder,
+        *,
+        close_builder: bool = True,
+        shutdown_timeout_seconds: float = 5.0,
+    ) -> None:
+        if shutdown_timeout_seconds <= 0:
+            raise ValueError("shutdown_timeout_seconds must be positive")
         self.builder = builder
+        self._close_builder = bool(close_builder)
+        self._shutdown_timeout_seconds = float(shutdown_timeout_seconds)
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = False
@@ -207,6 +230,28 @@ class SyncSnapshotBuilder:
             )
         )
 
+    def build_request(
+        self,
+        request: SnapshotRequest,
+        *,
+        deadline_seconds: float | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        snapshot_id: str | None = None,
+    ) -> Snapshot:
+        self._ensure_open()
+        return self._submit(
+            self.builder.build_request(
+                request,
+                deadline_seconds=deadline_seconds,
+                metadata=metadata,
+                snapshot_id=snapshot_id,
+            )
+        )
+
+    def health_snapshot(self) -> BuilderHealth:
+        self._ensure_open()
+        return self._submit(self.builder.health_snapshot())
+
     def session(
         self,
         *,
@@ -231,10 +276,17 @@ class SyncSnapshotBuilder:
     def close(self) -> None:
         if self._closed:
             return
-        self._submit(self.builder.wait_for_refreshes())
-        self._closed = True
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=2.0)
+        try:
+            if self._close_builder:
+                self._submit(self.builder.aclose())
+            else:
+                self._submit(self.builder.wait_for_refreshes())
+        finally:
+            self._closed = True
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=self._shutdown_timeout_seconds)
+        if self._thread.is_alive():
+            raise RuntimeError("Coalestra synchronous event-loop thread did not stop")
 
     def __enter__(self) -> SyncSnapshotBuilder:
         self._ensure_open()

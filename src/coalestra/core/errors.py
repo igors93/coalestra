@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from coalestra.core.models import ResourceKey
 
@@ -79,7 +80,13 @@ class ResourceResolutionError(CoalestraError):
 
 
 class SnapshotBuildError(CoalestraError):
-    def __init__(self, errors: Mapping[ResourceKey, Exception]):
+    def __init__(
+        self,
+        errors: Mapping[ResourceKey, Exception],
+        *,
+        snapshot: Any | None = None,
+    ) -> None:
         self.errors = dict(errors)
+        self.snapshot = snapshot
         summary = ", ".join(f"{key}={type(error).__name__}" for key, error in errors.items())
         super().__init__(f"Snapshot build failed: {summary}")

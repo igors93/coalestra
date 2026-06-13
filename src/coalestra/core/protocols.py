@@ -71,6 +71,13 @@ class ConcurrencyLimitedSource(Protocol):
 
 
 @runtime_checkable
+class BatchSizedSource(Protocol):
+    """Optional batch-source capability limiting keys per remote call."""
+
+    max_batch_size: int | None
+
+
+@runtime_checkable
 class ResilienceConfiguredSource(Protocol):
     """Optional source capability declaring source-local resilience behavior."""
 

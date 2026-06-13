@@ -8,6 +8,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
+from coalestra.core.errors import SourceProtocolError
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import FreshnessPolicy, SnapshotValue
 from coalestra.core.protocols import (
@@ -18,6 +19,7 @@ from coalestra.core.protocols import (
     FreshnessPolicyProvider,
     MetricsSink,
 )
+from coalestra.core.quality import ObservationPolicy
 
 T = TypeVar("T")
 
@@ -74,6 +76,7 @@ class ResourcePublisher:
         policy_resolver: FreshnessPolicyProvider,
         metrics: MetricsSink,
         events: EventSink,
+        observation_policy: ObservationPolicy | None = None,
         lock_stripes: int = 64,
     ) -> None:
         if lock_stripes < 1:
@@ -83,6 +86,7 @@ class ResourcePublisher:
         self.policy_resolver = policy_resolver
         self.metrics = metrics
         self.events = events
+        self.observation_policy = observation_policy or ObservationPolicy()
         self._locks = tuple(asyncio.Lock() for _ in range(lock_stripes))
         self._all_values_policy = FreshnessPolicy(
             ttl_seconds=float("inf"),
@@ -133,15 +137,23 @@ class ResourcePublisher:
         force: bool = False,
         replace_equal: bool = False,
     ) -> Mapping[ResourceKey, PublishResult]:
-        unique: dict[ResourceKey, ResourceUpdate[Any]] = {}
-        for update in updates:
-            unique[update.key] = update
-        if not unique:
+        update_list = tuple(updates)
+        if not update_list:
             return MappingProxyType({})
 
-        keys = tuple(unique)
+        keys = tuple(dict.fromkeys(update.key for update in update_list))
         async with self._locked_keys(keys):
             now = self.clock.now()
+            unique: dict[ResourceKey, ResourceUpdate[Any]] = {}
+            effective_times: dict[ResourceKey, float] = {}
+            for update in update_list:
+                observed_at = now if update.observed_at is None else float(update.observed_at)
+                self._validate_observed_at(update.key, observed_at, now=now)
+                previous_time = effective_times.get(update.key)
+                if previous_time is None or observed_at >= previous_time:
+                    unique[update.key] = update
+                    effective_times[update.key] = observed_at
+
             previous_values = await self._get_existing(keys, now=now)
             results: dict[ResourceKey, PublishResult] = {}
             pending_writes: list[SnapshotValue[Any]] = []
@@ -166,6 +178,10 @@ class ResourcePublisher:
                     continue
 
                 policy = self.policy_resolver.resolve(key)
+                future_seconds = max(0.0, observed_at - now)
+                published_metadata = {**update.metadata, "published": True}
+                if future_seconds > 0:
+                    published_metadata["clock_skew_seconds"] = future_seconds
                 published = SnapshotValue(
                     key=key,
                     value=update.value,
@@ -177,7 +193,7 @@ class ResourcePublisher:
                     from_cache=False,
                     latency_ms=0.0,
                     attempts=0,
-                    metadata={**update.metadata, "published": True},
+                    metadata=published_metadata,
                 )
                 pending_writes.append(published)
                 results[key] = PublishResult(
@@ -236,6 +252,22 @@ class ResourcePublisher:
             await self.cache.set_many(values)
         else:
             await asyncio.gather(*(self.cache.set(value) for value in values))
+
+    def _validate_observed_at(
+        self,
+        key: ResourceKey,
+        observed_at: float,
+        *,
+        now: float,
+    ) -> None:
+        future_seconds = observed_at - now
+        if (
+            future_seconds > self.observation_policy.future_tolerance_seconds
+            and self.observation_policy.reject_future_observations
+        ):
+            raise SourceProtocolError(
+                f"published observation for {key} is {future_seconds:.6f}s in the future"
+            )
 
     @staticmethod
     def _ignored_status(

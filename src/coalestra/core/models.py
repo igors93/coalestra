@@ -144,6 +144,34 @@ class Snapshot(Mapping[ResourceKey, SnapshotValue[Any]]):
             )
         return cast(T, item)
 
+    def maybe_value(self, key: ResourceKey, expected_type: type[T] | None = None) -> T | None:
+        """Return a resource value or ``None`` when the key was not resolved.
+
+        This is intended for explicitly optional resources. Required resources should use
+        :meth:`value` so a missing key remains visible.
+        """
+
+        item = self.resources.get(key)
+        if item is None:
+            return None
+        value = item.value
+        if expected_type is not None and not isinstance(value, expected_type):
+            raise TypeError(
+                f"Resource {key} contains {type(value).__name__}, expected {expected_type.__name__}"
+            )
+        return cast(T, value)
+
+    def error_for(self, key: ResourceKey) -> Exception | None:
+        """Return the resolution error associated with ``key``, when present."""
+
+        return self.errors.get(key)
+
+    @property
+    def stale_keys(self) -> tuple[ResourceKey, ...]:
+        """Resolved keys whose values are outside their freshness TTL."""
+
+        return tuple(key for key, value in self.resources.items() if value.stale)
+
     @property
     def complete(self) -> bool:
         """Whether every requested resource was resolved."""

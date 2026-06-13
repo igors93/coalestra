@@ -12,6 +12,7 @@ from coalestra import (
     PolicyResolver,
     ResourceKey,
     SnapshotBuilder,
+    SnapshotRequest,
     SourcePayload,
     SourceUnavailableError,
     SyncSnapshotBuilder,
@@ -98,6 +99,8 @@ def build_alphora_snapshot_provider(
                 supports=lambda key: key.namespace == "market" and key.name == "state",
                 fetcher=market_batch_fetch,
                 timeout_seconds=0.1,
+                max_batch_size=100,
+                run_sync_in_thread=False,
             ),
             CallableSource(
                 name="binance-rest",
@@ -109,6 +112,8 @@ def build_alphora_snapshot_provider(
         ],
         policy_resolver=policy_resolver,
         max_concurrency=6,
+        source_concurrency={"binance-rest": 4},
+        manage_lifecycle=True,
     )
     return SyncSnapshotBuilder(builder)
 
@@ -124,11 +129,17 @@ def build_cycle_snapshot(
         deadline_seconds=3.0,
         metadata={"cycle_id": cycle_id},
     ) as session:
-        baseline = [ACCOUNT, ALL_POSITIONS]
-        baseline.extend(market_state(symbol) for symbol in configured_symbols)
-        session.resolve(baseline, strict=False)
+        baseline = SnapshotRequest(
+            required=[ACCOUNT, ALL_POSITIONS],
+            optional=[market_state(symbol) for symbol in configured_symbols],
+        )
+        session.resolve_request(baseline)
 
-        heavy = [EXCHANGE_INFO]
-        for symbol in selected_symbols:
-            heavy.extend([position(symbol), exchange_rules(symbol)])
-        return session.resolve(heavy, strict=False)
+        heavy = SnapshotRequest(
+            required=[
+                EXCHANGE_INFO,
+                *(position(symbol) for symbol in selected_symbols),
+                *(exchange_rules(symbol) for symbol in selected_symbols),
+            ]
+        )
+        return session.resolve_request(heavy)

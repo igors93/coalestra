@@ -13,6 +13,7 @@ from coalestra.core.errors import (
     SourceTimeoutError,
     SourceUnavailableError,
 )
+from coalestra.core.health import BuilderHealth
 from coalestra.core.keys import (
     CASE_INSENSITIVE_KEY_NORMALIZER,
     LEGACY_KEY_NORMALIZER,
@@ -32,6 +33,7 @@ from coalestra.core.models import (
 from coalestra.core.protocols import (
     AsyncCache,
     BatchAsyncCache,
+    BatchSizedSource,
     BatchSnapshotSource,
     Clock,
     ConcurrencyLimitedSource,
@@ -44,6 +46,8 @@ from coalestra.core.protocols import (
     Source,
     SourceBase,
 )
+from coalestra.core.quality import ObservationPolicy
+from coalestra.core.request import SnapshotRequest
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
@@ -51,7 +55,9 @@ __all__ = [
     "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
     "BatchAsyncCache",
+    "BatchSizedSource",
     "BatchSnapshotSource",
+    "BuilderHealth",
     "CacheLookup",
     "CircuitOpenError",
     "Clock",
@@ -67,6 +73,7 @@ __all__ = [
     "FreshnessPolicyProvider",
     "KeyNormalizer",
     "MetricsSink",
+    "ObservationPolicy",
     "RefreshMode",
     "ResilienceConfiguredSource",
     "ResourceKey",
@@ -75,6 +82,7 @@ __all__ = [
     "Snapshot",
     "SnapshotBuildError",
     "SnapshotDiagnostics",
+    "SnapshotRequest",
     "SnapshotSource",
     "SnapshotValue",
     "Source",

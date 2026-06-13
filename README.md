@@ -24,6 +24,10 @@ It coalesces duplicate requests, batches compatible resources, derives values fr
 - Buffered event and metrics sinks that keep downstream I/O outside the acquisition path.
 - Replaceable cache, clock, event, and metrics interfaces.
 - Async API plus persistent synchronous facades.
+- Required/optional resource requests for integration-safe partial snapshots.
+- Deadline-aware retries, bounded batch chunking, and future-timestamp validation.
+- Health snapshots for cache, circuits, capacity, refreshes, and in-flight work.
+- Fast inline execution for explicitly non-blocking local synchronous sources.
 - Strict static typing and no runtime dependencies.
 
 ## Installation
@@ -33,6 +37,44 @@ python -m pip install -e ".[dev]"
 ```
 
 Python 3.10 or newer is supported.
+
+## Integration-ready requests
+
+Use `SnapshotRequest` to separate resources that must exist from resources that may fail without aborting the unit of work:
+
+```python
+from coalestra import SnapshotRequest
+
+request = SnapshotRequest(
+    required=[ACCOUNT, ALL_POSITIONS],
+    optional=[MARKET_HEALTH, LEARNING_CONTEXT],
+)
+
+snapshot = await builder.build_request(request, deadline_seconds=3.0)
+```
+
+Only required failures raise `SnapshotBuildError`. The exception exposes a partial `snapshot`, so already resolved values and diagnostics are not lost. Sessions and synchronous facades expose the same request API.
+
+## Fast local sources and bounded batches
+
+Synchronous adapters run in worker threads by default. Lock-protected, non-blocking in-memory reads can opt into inline execution:
+
+```python
+local_source = CallableBatchSource(
+    name="market-state",
+    priority=100,
+    supports=supports_market,
+    fetcher=read_local_market_state,
+    run_sync_in_thread=False,
+    max_batch_size=100,
+)
+```
+
+Do not use inline execution for network, filesystem, database, or any potentially blocking operation. Large batches are split into capacity-aware waves, avoiding unbounded task creation.
+
+## Timestamp precision
+
+`ObservationPolicy` rejects observations too far in the future, preventing clock errors from making values artificially fresh. Small accepted clock differences are recorded as `clock_skew_seconds` metadata.
 
 ## Generic resource identity
 
@@ -344,7 +386,7 @@ with SyncSnapshotBuilder(builder) as sync_builder:
     future.result()
 ```
 
-Synchronous fetchers and derivation functions run in worker threads. Transport-level timeouts are still necessary because an already-running Python thread cannot be forcibly terminated.
+Synchronous fetchers and derivation functions run in worker threads by default. `run_sync_in_thread=False` is available only for guaranteed non-blocking local reads. Transport-level timeouts remain necessary because an already-running Python thread cannot be forcibly terminated. Closing the synchronous facade closes its underlying builder by default.
 
 ## Architectural boundary
 
@@ -370,14 +412,14 @@ src/coalestra/
 make quality
 ```
 
-This runs formatting, linting, strict mypy, tests, and package build.
+This runs formatting, linting, strict mypy, verifies the 500-test minimum, executes the full 618-test suite, and builds the package.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Public API](docs/public-api.md)
-- [Migration from 0.3](docs/migration-0.4.md)
-- [Implementação 7, 8 e 9](docs/implementation-7-8-9.pt-BR.md)
+- [Migration from 0.4](docs/migration-0.5.md)
+- [Revisão final para integração](docs/integration-readiness.pt-BR.md)
 - [Integração com o Alphora](docs/alphora-integration.pt-BR.md)
 - [Changelog](CHANGELOG.md)
 

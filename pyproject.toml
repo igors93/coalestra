@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coalestra"
-version = "0.4.0"
-description = "Consistent snapshots with generic resource identity, batch caching, refresh policies, and buffered observability."
+version = "0.5.0"
+description = "Integration-ready consistent snapshots with required/optional resources, bounded batch dispatch, precise deadlines, and fast local sources."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
   { name = "Igor Souza" }
 ]
-keywords = ["snapshot", "cache", "batch", "single-flight", "refresh", "observability", "orchestration", "asyncio"]
+keywords = ["snapshot", "cache", "batch", "single-flight", "integration", "deadline", "observability", "orchestration", "asyncio"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",

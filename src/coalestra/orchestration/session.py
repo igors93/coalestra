@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from coalestra.core.errors import SessionClosedError, SnapshotBuildError
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue
+from coalestra.core.request import SnapshotRequest
 
 if TYPE_CHECKING:
     from coalestra.orchestration.builder import SnapshotBuilder, _ResolutionRuntime
@@ -64,6 +65,7 @@ class SnapshotSession:
         """
 
         self._ensure_open()
+        self._builder._ensure_open()
         requested = tuple(dict.fromkeys(keys))
         if not requested:
             raise ValueError("at least one resource key is required")
@@ -102,9 +104,30 @@ class SnapshotSession:
             retry_errors=retry_errors,
         )
 
+        snapshot = self.snapshot()
         if requested_errors and strict:
-            raise SnapshotBuildError(requested_errors)
-        return self.snapshot()
+            raise SnapshotBuildError(requested_errors, snapshot=snapshot)
+        return snapshot
+
+    async def resolve_request(
+        self,
+        request: SnapshotRequest,
+        *,
+        retry_errors: bool = False,
+    ) -> Snapshot:
+        """Resolve a required/optional resource request in this session."""
+
+        snapshot = await self.resolve(
+            request.keys,
+            strict=False,
+            retry_errors=retry_errors,
+        )
+        required_errors = {
+            key: snapshot.errors[key] for key in request.required if key in snapshot.errors
+        }
+        if required_errors:
+            raise SnapshotBuildError(required_errors, snapshot=snapshot)
+        return snapshot
 
     def snapshot(self) -> Snapshot:
         """Return an immutable view of everything explicitly requested in this session."""

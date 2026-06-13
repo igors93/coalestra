@@ -26,6 +26,8 @@ class CallableSource:
         timeout_seconds: float | None = None,
         max_concurrency: int | None = None,
         resilience_policy: SourceResiliencePolicy | None = None,
+        cache_supports: bool = True,
+        run_sync_in_thread: bool = True,
     ) -> None:
         normalized_name = name.strip()
         if not normalized_name:
@@ -39,6 +41,8 @@ class CallableSource:
         self.timeout_seconds = timeout_seconds
         self.max_concurrency = None if max_concurrency is None else int(max_concurrency)
         self.resilience_policy = resilience_policy
+        self.cache_supports = bool(cache_supports)
+        self.run_sync_in_thread = bool(run_sync_in_thread)
         self._supports = supports
         self._fetcher = fetcher
 
@@ -48,10 +52,12 @@ class CallableSource:
     async def fetch(self, key: ResourceKey, context: FetchContext) -> SourcePayload[Any]:
         if inspect.iscoroutinefunction(self._fetcher):
             result = await self._fetcher(key, context)
-        else:
+        elif self.run_sync_in_thread:
             result = await asyncio.to_thread(self._fetcher, key, context)
-            if inspect.isawaitable(result):
-                result = await result
+        else:
+            result = self._fetcher(key, context)
+        if inspect.isawaitable(result):
+            result = await result
 
         if isinstance(result, SourcePayload):
             return result

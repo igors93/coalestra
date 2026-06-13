@@ -29,7 +29,10 @@ class CallableBatchSource:
         fetcher: BatchFetcherFunction,
         timeout_seconds: float | None = None,
         max_concurrency: int | None = None,
+        max_batch_size: int | None = None,
         resilience_policy: SourceResiliencePolicy | None = None,
+        cache_supports: bool = True,
+        run_sync_in_thread: bool = True,
     ) -> None:
         normalized_name = name.strip()
         if not normalized_name:
@@ -38,11 +41,16 @@ class CallableBatchSource:
             raise ValueError("timeout_seconds must be positive")
         if max_concurrency is not None and max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1 or None")
+        if max_batch_size is not None and max_batch_size < 1:
+            raise ValueError("max_batch_size must be at least 1 or None")
         self.name = normalized_name
         self.priority = int(priority)
         self.timeout_seconds = timeout_seconds
         self.max_concurrency = None if max_concurrency is None else int(max_concurrency)
+        self.max_batch_size = None if max_batch_size is None else int(max_batch_size)
         self.resilience_policy = resilience_policy
+        self.cache_supports = bool(cache_supports)
+        self.run_sync_in_thread = bool(run_sync_in_thread)
         self._supports = supports
         self._fetcher = fetcher
 
@@ -60,10 +68,12 @@ class CallableBatchSource:
 
         if inspect.iscoroutinefunction(self._fetcher):
             result = await self._fetcher(requested, context)
-        else:
+        elif self.run_sync_in_thread:
             result = await asyncio.to_thread(self._fetcher, requested, context)
-            if inspect.isawaitable(result):
-                result = await result
+        else:
+            result = self._fetcher(requested, context)
+        if inspect.isawaitable(result):
+            result = await result
 
         if not isinstance(result, Mapping):
             raise SourceProtocolError(

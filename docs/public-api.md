@@ -325,3 +325,26 @@ Implements `MetricsSink` and exposes the same lifecycle methods.
 - `BufferOverflowPolicy.DROP_OLDEST`
 - `BufferOverflowPolicy.DROP_NEWEST`
 - `BufferOverflowPolicy.RAISE`
+
+## Version 0.5 integration APIs
+
+### `SnapshotRequest`
+
+Declares required and optional keys. Use with `SnapshotBuilder.build_request`, `SnapshotSession.resolve_request`, `SyncSnapshotBuilder.build_request`, or `SyncSnapshotSession.resolve_request`.
+
+### `ObservationPolicy`
+
+Controls tolerance and rejection of source or published timestamps that are ahead of the local clock.
+
+### `BuilderHealth`
+
+Returned by `await builder.health_snapshot()` and `sync_builder.health_snapshot()`. It includes builder state, refresh count, single-flight count, support-cache size, capacity state, cache statistics, and circuit snapshots.
+
+### Adapter options
+
+`CallableSource`, `CallableBatchSource`, and `CallableDerivedSource` accept:
+
+- `cache_supports`: memoize stable `supports(key)` results;
+- `run_sync_in_thread`: keep blocking callables out of the event loop, or explicitly run guaranteed non-blocking local reads inline.
+
+`CallableBatchSource` additionally accepts `max_batch_size`.

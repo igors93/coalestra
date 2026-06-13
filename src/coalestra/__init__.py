@@ -16,7 +16,9 @@ from coalestra.core import (
     PRESERVE_KEY_NORMALIZER,
     AsyncCache,
     BatchAsyncCache,
+    BatchSizedSource,
     BatchSnapshotSource,
+    BuilderHealth,
     CacheLookup,
     CircuitOpenError,
     CoalestraError,
@@ -28,6 +30,7 @@ from coalestra.core import (
     FreshnessPolicy,
     FreshnessPolicyProvider,
     KeyNormalizer,
+    ObservationPolicy,
     RefreshMode,
     ResilienceConfiguredSource,
     ResourceKey,
@@ -36,6 +39,7 @@ from coalestra.core import (
     Snapshot,
     SnapshotBuildError,
     SnapshotDiagnostics,
+    SnapshotRequest,
     SnapshotSource,
     SnapshotValue,
     SourceFailure,
@@ -70,7 +74,7 @@ from coalestra.resilience import (
 )
 from coalestra.sync import SyncResourcePublisher, SyncSnapshotBuilder, SyncSnapshotSession
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
@@ -79,11 +83,13 @@ __all__ = [
     "AsyncCache",
     "AsyncMemoryCache",
     "BatchAsyncCache",
+    "BatchSizedSource",
     "BatchSnapshotSource",
     "BufferOverflowPolicy",
     "BufferedEventSink",
     "BufferedMetricsSink",
     "BufferedSinkStats",
+    "BuilderHealth",
     "CacheLookup",
     "CacheStats",
     "CallableBatchSource",
@@ -114,6 +120,7 @@ __all__ = [
     "MetricRecord",
     "NullEventSink",
     "NullMetrics",
+    "ObservationPolicy",
     "PolicyResolver",
     "PublishResult",
     "PublishStatus",
@@ -130,6 +137,7 @@ __all__ = [
     "SnapshotBuildError",
     "SnapshotBuilder",
     "SnapshotDiagnostics",
+    "SnapshotRequest",
     "SnapshotSession",
     "SnapshotSource",
     "SnapshotValue",

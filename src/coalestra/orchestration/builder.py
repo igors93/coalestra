@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -23,6 +25,7 @@ from coalestra.core.errors import (
     SourceTimeoutError,
     SourceUnavailableError,
 )
+from coalestra.core.health import BuilderHealth
 from coalestra.core.models import (
     CacheLookup,
     FetchContext,
@@ -45,6 +48,8 @@ from coalestra.core.protocols import (
     Source,
     SourceBase,
 )
+from coalestra.core.quality import ObservationPolicy
+from coalestra.core.request import SnapshotRequest
 from coalestra.observability.events import NullEventSink
 from coalestra.observability.metrics import NullMetrics
 from coalestra.orchestration.policy import PolicyResolver
@@ -54,7 +59,7 @@ from coalestra.resilience.policy import (
     ResiliencePolicyResolver,
     SourceResiliencePolicy,
 )
-from coalestra.resilience.retry import RetryPolicy, run_with_retry
+from coalestra.resilience.retry import RetryPolicy, attempts_for, run_with_retry
 
 if TYPE_CHECKING:
     from coalestra.orchestration.session import SnapshotSession
@@ -122,12 +127,18 @@ class SnapshotBuilder:
         events: EventSink | None = None,
         max_concurrency: int = 8,
         source_concurrency: Mapping[str, int] | None = None,
+        observation_policy: ObservationPolicy | None = None,
+        cache_source_support: bool = True,
+        source_support_cache_max_entries: int | None = 100_000,
+        manage_lifecycle: bool = False,
     ) -> None:
         source_list = list(sources)
         if not source_list:
             raise ValueError("at least one source is required")
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
+        if source_support_cache_max_entries is not None and source_support_cache_max_entries < 1:
+            raise ValueError("source_support_cache_max_entries must be at least 1 or None")
 
         names = [source.name for source in source_list]
         if len(names) != len(set(names)):
@@ -156,6 +167,12 @@ class SnapshotBuilder:
         )
         self.metrics = metrics or NullMetrics()
         self.events = events or NullEventSink()
+        self.observation_policy = observation_policy or ObservationPolicy()
+        self.cache_source_support = bool(cache_source_support)
+        self.source_support_cache_max_entries = source_support_cache_max_entries
+        self.manage_lifecycle = bool(manage_lifecycle)
+        self._source_kinds = {source.name: self._source_kind(source) for source in self.sources}
+        self._source_support_cache: OrderedDict[tuple[str, ResourceKey], bool] = OrderedDict()
         self.max_concurrency = int(max_concurrency)
         self.capacity = CapacityController(
             global_limit=self.max_concurrency,
@@ -173,12 +190,43 @@ class SnapshotBuilder:
             policy_resolver=self.policy_resolver,
             metrics=self.metrics,
             events=self.events,
+            observation_policy=self.observation_policy,
         )
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     async def capacity_snapshot(self) -> dict[str, CapacitySnapshot]:
         """Return builder-wide and per-source capacity diagnostics."""
 
         return await self.capacity.snapshot()
+
+    def clear_source_support_cache(self) -> None:
+        """Forget memoized ``source.supports(key)`` results.
+
+        Most source capability predicates are structural and stable. Dynamic integrations can
+        disable support caching globally or call this method after reconfiguration.
+        """
+
+        self._source_support_cache.clear()
+
+    async def health_snapshot(self) -> BuilderHealth:
+        """Return an immutable integration health snapshot without performing source I/O."""
+
+        cache_stats = None
+        stats = getattr(self.cache, "stats", None)
+        if callable(stats):
+            cache_stats = await stats()
+        return BuilderHealth(
+            closed=self._closed,
+            background_refreshes=len(self._background_refreshes),
+            singleflight_in_flight=await self.single_flight.in_flight(),
+            source_support_cache_entries=len(self._source_support_cache),
+            capacity=await self.capacity.snapshot(),
+            cache=cache_stats,
+            circuits=await self.circuit_breaker.snapshot(),
+        )
 
     async def wait_for_refreshes(self) -> None:
         """Wait until every currently scheduled background refresh finishes."""
@@ -188,7 +236,7 @@ class SnapshotBuilder:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def aclose(self, *, cancel_refreshes: bool = False) -> None:
-        """Close the builder and settle background refresh work."""
+        """Close the builder, settle refreshes, and optionally close owned components."""
 
         if self._closed:
             return
@@ -199,6 +247,8 @@ class SnapshotBuilder:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self.manage_lifecycle:
+            await self._close_managed_components()
 
     async def __aenter__(self) -> SnapshotBuilder:
         self._ensure_open()
@@ -241,6 +291,35 @@ class SnapshotBuilder:
             snapshot = session.snapshot()
             self._record_snapshot_built(snapshot, strict=strict)
             return snapshot
+        finally:
+            await session.close()
+
+    async def build_request(
+        self,
+        request: SnapshotRequest,
+        *,
+        deadline_seconds: float | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        snapshot_id: str | None = None,
+    ) -> Snapshot:
+        """Resolve required and optional resources with integration-friendly failure semantics."""
+
+        self._ensure_open()
+        session = self.session(
+            deadline_seconds=deadline_seconds,
+            metadata=metadata,
+            snapshot_id=snapshot_id,
+        )
+        try:
+            snapshot = await session.resolve_request(request)
+            self._record_snapshot_built(snapshot, strict=True)
+            return snapshot
+        except SnapshotBuildError as error:
+            snapshot = session.snapshot()
+            self._record_snapshot_built(snapshot, strict=True)
+            if error.snapshot is None:
+                error.snapshot = snapshot
+            raise
         finally:
             await session.close()
 
@@ -478,7 +557,7 @@ class SnapshotBuilder:
             candidates: list[ResourceKey] = []
             for key in unresolved:
                 try:
-                    supported = source.supports(key)
+                    supported = self._source_supports(source, key, runtime.diagnostics)
                 except Exception as error:
                     failures[key].append(self._source_failure(source, error, attempts=0))
                     continue
@@ -519,13 +598,31 @@ class SnapshotBuilder:
                     continue
 
                 payload = cast(SourcePayload[Any], attempt.payload)
-                value = self._snapshot_value(
-                    key=key,
-                    source=source,
-                    payload=payload,
-                    attempts=attempt.attempts,
-                    latency_ms=attempt.latency_ms,
-                )
+                try:
+                    value = self._snapshot_value(
+                        key=key,
+                        source=source,
+                        payload=payload,
+                        attempts=attempt.attempts,
+                        latency_ms=attempt.latency_ms,
+                    )
+                except SourceProtocolError as error:
+                    runtime.diagnostics.future_timestamp_rejections += 1
+                    failures[key].append(
+                        self._source_failure(source, error, attempts=attempt.attempts)
+                    )
+                    self.metrics.increment(
+                        "source_fetch_total",
+                        status="invalid_timestamp",
+                        source=source.name,
+                    )
+                    self.events.emit(
+                        "source_payload_rejected",
+                        resource=str(key),
+                        source=source.name,
+                        error=str(error),
+                    )
+                    continue
                 policy = self.policy_resolver.resolve(key)
                 if value.stale:
                     if value.age_seconds <= policy.max_stale_seconds and (
@@ -560,7 +657,7 @@ class SnapshotBuilder:
                     source=source.name,
                     latency_ms=attempt.latency_ms,
                     attempts=attempt.attempts,
-                    source_kind=self._source_kind(source),
+                    source_kind=self._source_kinds[source.name],
                 )
 
             if fresh_values:
@@ -598,7 +695,7 @@ class SnapshotBuilder:
         ancestry: tuple[ResourceKey, ...],
         local_owned: frozenset[ResourceKey],
     ) -> dict[ResourceKey, _SourceAttempt]:
-        kind = self._source_kind(source)
+        kind = self._source_kinds[source.name]
         if kind == "derived":
             return await self._attempt_derived_source(
                 cast(DerivedSource, source),
@@ -609,12 +706,41 @@ class SnapshotBuilder:
                 local_owned=local_owned,
             )
         if kind == "batch":
-            return await self._attempt_batch_source(
-                cast(BatchSnapshotSource, source),
-                keys,
-                context=context,
-                runtime=runtime,
+            batch_source = cast(BatchSnapshotSource, source)
+            requested = tuple(dict.fromkeys(keys))
+            max_batch_size = getattr(batch_source, "max_batch_size", None)
+            if max_batch_size is None or len(requested) <= int(max_batch_size):
+                runtime.diagnostics.batch_chunks += 1
+                return await self._attempt_batch_source(
+                    batch_source,
+                    requested,
+                    context=context,
+                    runtime=runtime,
+                )
+            chunks = tuple(
+                requested[index : index + int(max_batch_size)]
+                for index in range(0, len(requested), int(max_batch_size))
             )
+            runtime.diagnostics.batch_chunks += len(chunks)
+            source_limit = self.capacity.limit_for(batch_source.name)
+            wave_size = max(1, min(self.max_concurrency, source_limit or self.max_concurrency))
+            merged: dict[ResourceKey, _SourceAttempt] = {}
+            for start in range(0, len(chunks), wave_size):
+                wave = chunks[start : start + wave_size]
+                completed = await asyncio.gather(
+                    *(
+                        self._attempt_batch_source(
+                            batch_source,
+                            chunk,
+                            context=context,
+                            runtime=runtime,
+                        )
+                        for chunk in wave
+                    )
+                )
+                for result in completed:
+                    merged.update(result)
+            return merged
         return await self._attempt_single_source(
             cast(SnapshotSource, source),
             keys,
@@ -644,7 +770,10 @@ class SnapshotBuilder:
                     partial(self._fetch_once, source, key, context, runtime),
                     policy=resilience.retry,
                     retryable=self._is_retryable,
+                    deadline_monotonic=context.deadline_monotonic,
+                    monotonic=self.clock.monotonic,
                 )
+                runtime.diagnostics.retries += max(0, attempts - 1)
                 await self._record_payload_circuit_outcome(
                     source,
                     key,
@@ -676,9 +805,13 @@ class SnapshotBuilder:
                     key=key,
                     policy=resilience.circuit,
                 )
+                if isinstance(error, SourceProtocolError) and "in the future" in str(error):
+                    runtime.diagnostics.future_timestamp_rejections += 1
+                attempts = self._attempt_count(error, resilience.retry)
+                runtime.diagnostics.retries += max(0, attempts - 1)
                 return key, _SourceAttempt(
                     error=error,
-                    attempts=self._attempt_count(error, resilience.retry),
+                    attempts=attempts,
                     latency_ms=self._elapsed_ms(started),
                 )
 
@@ -730,10 +863,20 @@ class SnapshotBuilder:
                 partial(self._fetch_many_once, source, active_keys, context, runtime),
                 policy=resilience.retry,
                 retryable=self._is_retryable,
+                deadline_monotonic=context.deadline_monotonic,
+                monotonic=self.clock.monotonic,
             )
+            runtime.diagnostics.retries += max(0, attempts - 1)
             latency_ms = self._elapsed_ms(started)
             runtime.diagnostics.record_source_latency(source.name, latency_ms)
-            returned = set(payloads)
+            invalid_payloads: dict[ResourceKey, SourceProtocolError] = {}
+            for key, payload in payloads.items():
+                try:
+                    self._validate_payload_timestamp(key, payload)
+                except SourceProtocolError as error:
+                    invalid_payloads[key] = error
+                    runtime.diagnostics.future_timestamp_rejections += 1
+            returned = set(payloads).difference(invalid_payloads)
             for representative, grouped_keys in active_groups:
                 has_fresh_value = any(
                     key in returned and self._payload_is_fresh(key, payloads[key])
@@ -763,7 +906,13 @@ class SnapshotBuilder:
                 source=source.name,
             )
             for key in active_keys:
-                if key in payloads:
+                if key in invalid_payloads:
+                    results[key] = _SourceAttempt(
+                        error=invalid_payloads[key],
+                        attempts=attempts,
+                        latency_ms=latency_ms,
+                    )
+                elif key in payloads:
                     results[key] = _SourceAttempt(
                         payload=payloads[key],
                         attempts=attempts,
@@ -800,10 +949,12 @@ class SnapshotBuilder:
                 status="failure",
                 source=source.name,
             )
+            attempts = self._attempt_count(error, resilience.retry)
+            runtime.diagnostics.retries += max(0, attempts - 1)
             for key in active_keys:
                 results[key] = _SourceAttempt(
                     error=error,
-                    attempts=self._attempt_count(error, resilience.retry),
+                    attempts=attempts,
                     latency_ms=latency_ms,
                 )
             return results
@@ -870,7 +1021,10 @@ class SnapshotBuilder:
                     ),
                     policy=resilience.retry,
                     retryable=self._is_retryable,
+                    deadline_monotonic=context.deadline_monotonic,
+                    monotonic=self.clock.monotonic,
                 )
+                runtime.diagnostics.retries += max(0, attempts - 1)
                 await self._record_payload_circuit_outcome(
                     source,
                     key,
@@ -896,10 +1050,24 @@ class SnapshotBuilder:
                     attempts=0,
                     latency_ms=self._elapsed_ms(started),
                 )
-            except (DependencyCycleError, DependencyResolutionError, SourceProtocolError) as error:
+            except (DependencyCycleError, DependencyResolutionError) as error:
                 return key, _SourceAttempt(
                     error=error,
                     attempts=0,
+                    latency_ms=self._elapsed_ms(started),
+                )
+            except SourceProtocolError as error:
+                await self.circuit_breaker.record_failure(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
+                runtime.diagnostics.future_timestamp_rejections += int(
+                    "in the future" in str(error)
+                )
+                return key, _SourceAttempt(
+                    error=error,
+                    attempts=1,
                     latency_ms=self._elapsed_ms(started),
                 )
             except Exception as error:
@@ -908,9 +1076,11 @@ class SnapshotBuilder:
                     key=key,
                     policy=resilience.circuit,
                 )
+                attempts = self._attempt_count(error, resilience.retry)
+                runtime.diagnostics.retries += max(0, attempts - 1)
                 return key, _SourceAttempt(
                     error=error,
-                    attempts=self._attempt_count(error, resilience.retry),
+                    attempts=attempts,
                     latency_ms=self._elapsed_ms(started),
                 )
 
@@ -1036,9 +1206,13 @@ class SnapshotBuilder:
         latency_ms: float,
     ) -> SnapshotValue[Any]:
         fetched_at = self.clock.now()
+        future_seconds = self._validate_payload_timestamp(key, payload)
         observed_at = payload.observed_at if payload.observed_at is not None else fetched_at
         age_seconds = max(0.0, fetched_at - observed_at)
         policy = self.policy_resolver.resolve(key)
+        metadata = dict(payload.metadata)
+        if future_seconds > 0:
+            metadata["clock_skew_seconds"] = future_seconds
         return SnapshotValue(
             key=key,
             value=payload.value,
@@ -1050,12 +1224,34 @@ class SnapshotBuilder:
             from_cache=False,
             latency_ms=latency_ms,
             attempts=attempts,
-            metadata=payload.metadata,
+            metadata=metadata,
         )
 
     @staticmethod
     def _coerce_payload(value: SourcePayload[Any] | Any) -> SourcePayload[Any]:
         return value if isinstance(value, SourcePayload) else SourcePayload(value=value)
+
+    def _source_supports(
+        self,
+        source: SourceBase,
+        key: ResourceKey,
+        diagnostics: DiagnosticsCollector,
+    ) -> bool:
+        cacheable = self.cache_source_support and bool(getattr(source, "cache_supports", True))
+        cache_key = (source.name, key)
+        if cacheable and cache_key in self._source_support_cache:
+            diagnostics.support_cache_hits += 1
+            self._source_support_cache.move_to_end(cache_key)
+            return self._source_support_cache[cache_key]
+        diagnostics.support_cache_misses += 1
+        supported = bool(source.supports(key))
+        if cacheable:
+            self._source_support_cache[cache_key] = supported
+            self._source_support_cache.move_to_end(cache_key)
+            if self.source_support_cache_max_entries is not None:
+                while len(self._source_support_cache) > self.source_support_cache_max_entries:
+                    self._source_support_cache.popitem(last=False)
+        return supported
 
     @staticmethod
     def _source_kind(source: Source) -> SourceKind:
@@ -1076,6 +1272,9 @@ class SnapshotBuilder:
         max_concurrency = getattr(source, "max_concurrency", None)
         if max_concurrency is not None and int(max_concurrency) < 1:
             raise ValueError(f"source {source.name} max_concurrency must be at least 1")
+        max_batch_size = getattr(source, "max_batch_size", None)
+        if max_batch_size is not None and int(max_batch_size) < 1:
+            raise ValueError(f"source {source.name} max_batch_size must be at least 1")
         declared_resilience = getattr(source, "resilience_policy", None)
         if declared_resilience is not None and not isinstance(
             declared_resilience, SourceResiliencePolicy
@@ -1126,11 +1325,30 @@ class SnapshotBuilder:
             grouped.setdefault(identity, []).append(key)
         return [(items[0], tuple(items)) for items in grouped.values()]
 
+    def _validate_payload_timestamp(
+        self,
+        key: ResourceKey,
+        payload: SourcePayload[Any],
+    ) -> float:
+        observed_at = payload.observed_at
+        if observed_at is None:
+            return 0.0
+        future_seconds = float(observed_at) - self.clock.now()
+        if (
+            future_seconds > self.observation_policy.future_tolerance_seconds
+            and self.observation_policy.reject_future_observations
+        ):
+            raise SourceProtocolError(
+                f"source observation for {key} is {future_seconds:.6f}s in the future"
+            )
+        return max(0.0, future_seconds)
+
     def _payload_is_fresh(
         self,
         key: ResourceKey,
         payload: SourcePayload[Any],
     ) -> bool:
+        self._validate_payload_timestamp(key, payload)
         observed_at = payload.observed_at
         if observed_at is None:
             return True
@@ -1174,7 +1392,8 @@ class SnapshotBuilder:
         )
 
     def _attempt_count(self, error: Exception, retry_policy: RetryPolicy) -> int:
-        return retry_policy.max_attempts if self._is_retryable(error) else 1
+        default = retry_policy.max_attempts if self._is_retryable(error) else 1
+        return attempts_for(error, default=default)
 
     def _elapsed_ms(self, started: float) -> float:
         return max(0.0, (self.clock.monotonic() - started) * 1000)
@@ -1333,6 +1552,36 @@ class SnapshotBuilder:
             self._background_refreshes.pop(key, None)
         if not task.cancelled():
             task.exception()
+
+    async def _close_managed_components(self) -> None:
+        seen: set[int] = set()
+        components = (*self.sources, self.cache, self.events, self.metrics)
+        for component in components:
+            identity = id(component)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            await self._close_component(component)
+
+    @staticmethod
+    async def _close_component(component: object) -> None:
+        async_close = getattr(component, "aclose", None)
+        if callable(async_close):
+            if inspect.iscoroutinefunction(async_close):
+                await async_close()
+            else:
+                result = await asyncio.to_thread(async_close)
+                if inspect.isawaitable(result):
+                    await result
+            return
+        close = getattr(component, "close", None)
+        if callable(close):
+            if inspect.iscoroutinefunction(close):
+                await close()
+            else:
+                result = await asyncio.to_thread(close)
+                if inspect.isawaitable(result):
+                    await result
 
     def _ensure_open(self) -> None:
         if self._closed:

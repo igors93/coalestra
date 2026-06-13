@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 - 2026-06-13
+
+- Added `SnapshotRequest` with required and optional resource semantics.
+- Added partial snapshots to `SnapshotBuildError` for immediate fallback and diagnostics.
+- Added `SnapshotBuilder.build_request()` and synchronous/session equivalents.
+- Added `BuilderHealth` and health snapshots covering cache, capacity, circuits, refreshes, and single-flight work.
+- Added configurable, bounded LRU caching for `source.supports()` decisions.
+- Added `max_batch_size` with capacity-aware chunk dispatch for batch sources.
+- Added deadline-aware retry backoff and exact retry-attempt diagnostics.
+- Added `ObservationPolicy` for future-timestamp precision in sources and event publication.
+- Fixed bulk publication so the newest duplicate update wins regardless of input order.
+- Preserved each `ResourceKey` normalizer across qualifier transformations.
+- Added optional inline execution for guaranteed non-blocking synchronous source adapters.
+- Added managed component lifecycle and corrected synchronous builder shutdown.
+- Expanded snapshot diagnostics with support-cache, retry, chunk, and timestamp-rejection counters.
+- Added an enforced 500-test minimum; the release suite contains 618 collected tests.
+
 ## 0.4.0 - 2026-06-13
 
 - Made `ResourceKey` case-preserving by default and added configurable `KeyNormalizer` policies.

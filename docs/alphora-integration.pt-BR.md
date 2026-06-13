@@ -1,5 +1,21 @@
 # Integração com o Alphora
 
+## API de integração da versão 0.5
+
+Use `SnapshotRequest` para impedir que contexto auxiliar bloqueie o ciclo:
+
+```python
+baseline_request = SnapshotRequest(
+    required=[ACCOUNT, ALL_POSITIONS],
+    optional=[market_state(symbol) for symbol in configured_symbols],
+)
+baseline = session.resolve_request(baseline_request)
+```
+
+Para MarketDataHub e UserDataShadowCache, os adaptadores podem usar `run_sync_in_thread=False` porque a leitura é local, protegida por lock e não realiza I/O. Mantenha o padrão em thread para Binance REST. Configure `max_batch_size` para evitar lotes maiores que o contrato da fonte.
+
+O provider deve usar `ObservationPolicy` para rejeitar timestamps muito à frente do relógio local. No shutdown, `SyncSnapshotBuilder.close()` fecha o builder subjacente por padrão.
+
 A Coalestra deve substituir aquisição e composição de leituras. Estratégia, risco, reconciliação decisória e envio de ordens permanecem no Alphora.
 
 ## Modelo recomendado

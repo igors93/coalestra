@@ -28,6 +28,11 @@ class SnapshotDiagnostics:
     refresh_scheduled: int = 0
     refresh_completed: int = 0
     refresh_failed: int = 0
+    support_cache_hits: int = 0
+    support_cache_misses: int = 0
+    retries: int = 0
+    batch_chunks: int = 0
+    future_timestamp_rejections: int = 0
     observation_skew_ms: float = 0.0
     source_calls_by_source: Mapping[str, int] = field(default_factory=dict)
     source_latency_ms_by_source: Mapping[str, float] = field(default_factory=dict)
@@ -63,6 +68,11 @@ class DiagnosticsCollector:
     refresh_scheduled: int = 0
     refresh_completed: int = 0
     refresh_failed: int = 0
+    support_cache_hits: int = 0
+    support_cache_misses: int = 0
+    retries: int = 0
+    batch_chunks: int = 0
+    future_timestamp_rejections: int = 0
     source_calls_by_source: Counter[str] = field(default_factory=Counter)
     source_latency_ms_by_source: defaultdict[str, float] = field(
         default_factory=lambda: defaultdict(float)
@@ -110,6 +120,11 @@ class DiagnosticsCollector:
             refresh_scheduled=self.refresh_scheduled,
             refresh_completed=self.refresh_completed,
             refresh_failed=self.refresh_failed,
+            support_cache_hits=self.support_cache_hits,
+            support_cache_misses=self.support_cache_misses,
+            retries=self.retries,
+            batch_chunks=self.batch_chunks,
+            future_timestamp_rejections=self.future_timestamp_rejections,
             observation_skew_ms=skew_ms,
             source_calls_by_source=self.source_calls_by_source,
             source_latency_ms_by_source=self.source_latency_ms_by_source,

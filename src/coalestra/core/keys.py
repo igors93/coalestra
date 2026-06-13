@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
@@ -91,6 +91,7 @@ class ResourceKey:
     name: str
     subject: str
     qualifiers: tuple[tuple[str, str], ...]
+    _normalizer: KeyNormalizer = field(compare=False, repr=False)
 
     def __init__(
         self,
@@ -126,6 +127,7 @@ class ResourceKey:
         object.__setattr__(self, "name", normalized_name)
         object.__setattr__(self, "subject", normalized_subject)
         object.__setattr__(self, "qualifiers", tuple(sorted(normalized_qualifiers)))
+        object.__setattr__(self, "_normalizer", selected)
 
     @classmethod
     def legacy(
@@ -159,8 +161,9 @@ class ResourceKey:
     def qualifier(self, name: str, default: str | None = None) -> str | None:
         """Return one qualifier value using exact qualifier-name identity."""
 
+        normalized_name = self._normalizer.qualifier_name(str(name))
         for qualifier_name, value in self.qualifiers:
-            if qualifier_name == name:
+            if qualifier_name == normalized_name:
                 return value
         return default
 
@@ -179,17 +182,24 @@ class ResourceKey:
             items = qualifiers.items() if isinstance(qualifiers, Mapping) else qualifiers
             merged.update((str(name), str(value)) for name, value in items)
         merged.update((str(name), str(value)) for name, value in additional.items())
-        return ResourceKey(self.namespace, self.name, self.subject, merged)
+        return ResourceKey(
+            self.namespace,
+            self.name,
+            self.subject,
+            merged,
+            normalizer=self._normalizer,
+        )
 
     def without_qualifiers(self, *names: str) -> ResourceKey:
         """Return a new key without the selected qualifier names."""
 
-        removed = set(names)
+        removed = {self._normalizer.qualifier_name(str(name)) for name in names}
         return ResourceKey(
             self.namespace,
             self.name,
             self.subject,
             ((name, value) for name, value in self.qualifiers if name not in removed),
+            normalizer=self._normalizer,
         )
 
     def __str__(self) -> str:
