@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coalestra"
+version = "0.1.0"
+description = "Consistent snapshots from prioritized sources with request coalescing, freshness policies and resilient concurrent reads."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Igor Souza" }
+]
+keywords = ["snapshot", "cache", "single-flight", "orchestration", "resilience", "asyncio"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "mypy>=1.10",
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[project.urls]
+Documentation = "https://github.com/igors93/coalestra"
+Repository = "https://github.com/igors93/coalestra"
+Issues = "https://github.com/igors93/coalestra/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+coalestra = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "C4", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "src"
+packages = ["coalestra"]
