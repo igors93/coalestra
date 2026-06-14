@@ -74,7 +74,7 @@ from coalestra.resilience import (
 )
 from coalestra.sync import SyncResourcePublisher, SyncSnapshotBuilder, SyncSnapshotSession
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",

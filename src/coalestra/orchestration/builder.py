@@ -1178,7 +1178,10 @@ class SnapshotBuilder:
             return await asyncio.wait_for(operation(), timeout=timeout)
         except (TimeoutError, asyncio.TimeoutError) as error:
             target = f" while resolving {resource}" if resource is not None else ""
-            raise SourceTimeoutError(f"source {source.name} timed out{target}") from error
+
+            raise SourceTimeoutError(
+                f"source {source.name} timed out after {timeout:.3f}s{target}"
+            ) from error
 
     def _effective_timeout(
         self,

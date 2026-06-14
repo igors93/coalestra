@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 - 2026-06-14
+
+- Added bounded nested source-failure details to `SnapshotBuildError`.
+- Added JSON-safe `to_dict()` diagnostics to snapshot and resource errors.
+- Added source names, error types, messages, and retry attempts to structured diagnostics.
+- Added the effective timeout budget to `SourceTimeoutError` messages.
+- Preserved concise default error rendering while keeping every failure available programmatically.
+
 ## 0.5.0 - 2026-06-13
 
 - Added `SnapshotRequest` with required and optional resource semantics.
