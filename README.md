@@ -178,8 +178,7 @@ newest of those two wins, while keeping REST at a lower rank. Resource-specific 
 `SnapshotValue.authority_rank` records the rank used for the cached revision. `force=True` remains an
 explicit administrative override and can replace a higher-authority value. Freshness is still
 independent: authority decides write precedence, while `FreshnessPolicy` decides whether a stored
-value is usable by a reader. If a higher-authority publication arrives while a lower-authority source
-call is in flight, the completed snapshot adopts the fresh authoritative cache winner.
+value is usable by a reader.
 
 Custom caches used with configured authority rules must implement the same atomic comparison and
 declare `validates_source_authority = True`. Clear persistent caches after changing authority ranks,
@@ -331,12 +330,13 @@ Every `SnapshotValue` carries an opaque resource version. Derived values record 
 
 ## Global and per-source capacity
 
-`max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity.
+`max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity. `max_pending_tasks` bounds the fixed worker pool used to dispatch individual and derived resources, preventing one large request from creating one asyncio task per key. It defaults to `max_concurrency`.
 
 ```python
 builder = SnapshotBuilder(
     sources,
     max_concurrency=12,
+    max_pending_tasks=12,
     source_concurrency={
         "remote-rest": 4,
         "database": 6,
@@ -356,7 +356,7 @@ rest_source = CallableSource(
 )
 ```
 
-An explicit `source_concurrency` entry overrides the limit declared by the source. Batch calls consume one slot regardless of batch size. Derivation consumes a slot only while the derivation function itself runs; dependency acquisition uses its own source slots.
+An explicit `source_concurrency` entry overrides the limit declared by the source. Batch calls consume one slot regardless of batch size. Derivation consumes a slot only while the derivation function itself runs; dependency acquisition uses its own source slots. Individual and derived dispatch preserve input ordering while using at most `max_pending_tasks` workers per source attempt. Values above `max_concurrency` permit a bounded number of workers to wait during retries or capacity contention; lower values deliberately reduce dispatch parallelism.
 
 ## Source-specific resilience and circuit scopes
 

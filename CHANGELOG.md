@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.4 - 2026-06-15
 
 - Added transactional selective revalidation for pinned session resources.
 - Refreshed already-pinned derived dependents transitively when a dependency is revalidated.
@@ -8,7 +8,7 @@
 - Preserved the previous session state when any affected resource fails revalidation.
 - Added explicit source-authority policies for cache and publication conflicts.
 - Added authority-aware cache outcomes while preserving timestamp ordering for equal-ranked sources.
-- Ensured concurrent authoritative publications supersede lower-authority in-flight source results.
+- Bounded individual and derived source dispatch with a configurable fixed worker pool.
 
 ## 0.5.3 - 2026-06-15
 

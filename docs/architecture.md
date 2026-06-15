@@ -79,6 +79,8 @@ a derived resource from waiting on a dependency already owned by the same resolu
 
 ## Capacity model
 
+Individual and derived source attempts are scheduled through a fixed worker pool bounded by `max_pending_tasks`. This prevents large key collections from creating one pending asyncio task per resource while preserving input order and cancellation propagation.
+
 The builder owns one global `CapacityLimiter` and zero or more source limiters.
 
 Source capacity is acquired before global capacity. A heavily queued source therefore does not consume every global slot while it waits behind its own smaller limit.

@@ -13,6 +13,7 @@ builder = SnapshotBuilder(
     sources=[...],
     default_policy=FreshnessPolicy(1.0, 10.0),
     max_concurrency=12,
+    max_pending_tasks=12,
     source_concurrency={"rest": 4},
     source_resilience={"rest": rest_policy},
 )
@@ -36,7 +37,7 @@ Important attributes:
 - `metrics`
 - `events`
 
-Constructor compatibility is preserved for `retry_policy`, `circuit_breaker`, and `max_concurrency`. `max_concurrency` is now builder-wide rather than per build.
+Constructor compatibility is preserved for `retry_policy`, `circuit_breaker`, and `max_concurrency`. `max_concurrency` is builder-wide. `max_pending_tasks` defaults to `max_concurrency` and bounds the worker tasks created for individual and derived source dispatch.
 
 ### `SnapshotSession`
 
@@ -112,6 +113,8 @@ Callable adapters accept both as constructor arguments.
 Each accepts synchronous or asynchronous callables. Synchronous functions run in worker threads.
 
 ## Capacity
+
+Individual and derived sources use a fixed worker pool instead of creating one task per requested key. `max_pending_tasks` controls the maximum workers created by each source dispatch. Results retain the original key order, and cancellation stops all workers before the operation exits. Batch chunk dispatch remains bounded by global capacity, source capacity, and the same pending-task limit.
 
 ### `CapacityLimiter`
 

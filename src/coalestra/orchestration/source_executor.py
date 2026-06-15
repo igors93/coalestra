@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from functools import partial
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeVar, cast
 
 from coalestra.core.errors import (
     CircuitOpenError,
@@ -20,6 +20,9 @@ from coalestra.orchestration.runtime import ResolutionRuntime, SourceAttempt
 from coalestra.orchestration.source_calls import SourceCalls
 from coalestra.orchestration.source_catalog import SourceCatalog
 from coalestra.resilience.retry import run_with_retry
+
+DispatchItem = TypeVar("DispatchItem")
+DispatchResult = TypeVar("DispatchResult")
 
 
 class ResolveMany(Protocol):
@@ -44,11 +47,13 @@ class SourceExecutor:
         source_calls: SourceCalls,
         resolve_many: ResolveMany,
         max_concurrency: int,
+        max_pending_tasks: int,
     ) -> None:
         self.source_catalog = source_catalog
         self.calls = source_calls
         self.resolve_many = resolve_many
         self.max_concurrency = max_concurrency
+        self.max_pending_tasks = max_pending_tasks
 
     async def attempt(
         self,
@@ -94,6 +99,7 @@ class SourceExecutor:
                 1,
                 min(
                     self.max_concurrency,
+                    self.max_pending_tasks,
                     source_limit or self.max_concurrency,
                 ),
             )
@@ -217,7 +223,7 @@ class SourceExecutor:
                     latency_ms=self.calls.elapsed_ms(started),
                 )
 
-        completed = await asyncio.gather(*(fetch_one(key) for key in keys))
+        completed = await self._run_bounded(keys, fetch_one)
         for _key, attempt in completed:
             runtime.diagnostics.record_source_latency(
                 source.name,
@@ -617,10 +623,44 @@ class SourceExecutor:
                     latency_ms=self.calls.elapsed_ms(started),
                 )
 
-        completed = await asyncio.gather(*(derive_one(key) for key in keys))
+        completed = await self._run_bounded(keys, derive_one)
         for _key, attempt in completed:
             runtime.diagnostics.record_source_latency(
                 source.name,
                 attempt.latency_ms,
             )
         return dict(completed)
+
+    async def _run_bounded(
+        self,
+        items: Collection[DispatchItem],
+        operation: Callable[[DispatchItem], Awaitable[DispatchResult]],
+    ) -> tuple[DispatchResult, ...]:
+        """Run work through a fixed worker set instead of one task per item."""
+
+        ordered = tuple(items)
+        if not ordered:
+            return ()
+
+        worker_count = min(self.max_pending_tasks, len(ordered))
+        results: dict[int, DispatchResult] = {}
+        next_index = 0
+
+        async def worker() -> None:
+            nonlocal next_index
+
+            while next_index < len(ordered):
+                index = next_index
+                next_index += 1
+                results[index] = await operation(ordered[index])
+
+        workers = tuple(asyncio.create_task(worker()) for _ in range(worker_count))
+        try:
+            await asyncio.gather(*workers)
+        except BaseException:
+            for worker_task in workers:
+                worker_task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
+
+        return tuple(results[index] for index in range(len(ordered)))

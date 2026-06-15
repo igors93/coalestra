@@ -20,7 +20,6 @@ from coalestra.core.errors import (
 from coalestra.core.health import BuilderHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
-    CacheWriteStatus,
     FetchContext,
     FreshnessPolicy,
     RefreshMode,
@@ -86,6 +85,7 @@ class SnapshotBuilder:
         metrics: MetricsSink | None = None,
         events: EventSink | None = None,
         max_concurrency: int = 8,
+        max_pending_tasks: int | None = None,
         source_concurrency: Mapping[str, int] | None = None,
         observation_policy: ObservationPolicy | None = None,
         cache_source_support: bool = True,
@@ -101,6 +101,8 @@ class SnapshotBuilder:
             raise ValueError("at least one source is required")
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
+        if max_pending_tasks is not None and max_pending_tasks < 1:
+            raise ValueError("max_pending_tasks must be at least 1 or None")
         if source_support_cache_max_entries is not None and source_support_cache_max_entries < 1:
             raise ValueError("source_support_cache_max_entries must be at least 1 or None")
 
@@ -131,6 +133,9 @@ class SnapshotBuilder:
         self.source_support_cache_max_entries = source_support_cache_max_entries
         self.manage_lifecycle = bool(manage_lifecycle)
         self.max_concurrency = int(max_concurrency)
+        self.max_pending_tasks = (
+            self.max_concurrency if max_pending_tasks is None else int(max_pending_tasks)
+        )
 
         self._source_catalog = SourceCatalog(
             source_list,
@@ -173,6 +178,7 @@ class SnapshotBuilder:
             source_calls=self._source_calls,
             resolve_many=self._resolve_many,
             max_concurrency=self.max_concurrency,
+            max_pending_tasks=self.max_pending_tasks,
         )
         self._refresh_manager = RefreshManager(
             clock=self.clock,
@@ -686,47 +692,7 @@ class SnapshotBuilder:
                 )
 
             if fresh_values:
-                write_results = await self._cache_access.set_many(
-                    fresh_values,
-                    diagnostics=runtime.diagnostics,
-                )
-                if write_results is not None:
-                    for candidate in fresh_values:
-                        write_result = write_results.get(candidate.key)
-                        if (
-                            write_result is None
-                            or write_result.status is not CacheWriteStatus.IGNORED_LOWER_AUTHORITY
-                        ):
-                            continue
-                        winner = write_result.value
-                        winner_policy = self.policy_resolver.resolve(candidate.key)
-                        winner_age = max(0.0, self.clock.now() - winner.observed_at)
-                        if winner_age > winner_policy.ttl_seconds:
-                            continue
-                        authoritative = self._cache_access.cached_copy(
-                            winner,
-                            stale=False,
-                            extra_metadata={
-                                "superseded_source": candidate.source,
-                                "superseded_authority_rank": candidate.authority_rank,
-                                "cache_write_status": write_result.status.value,
-                            },
-                        )
-                        runtime.memo[candidate.key] = authoritative
-                        resolved[candidate.key] = ResolutionResult(value=authoritative)
-                        self.metrics.increment(
-                            "source_fetch_superseded_total",
-                            source=candidate.source,
-                        )
-                        self.events.emit(
-                            "resource_resolution_superseded",
-                            resource=str(candidate.key),
-                            candidate_source=candidate.source,
-                            candidate_authority_rank=candidate.authority_rank,
-                            winning_source=authoritative.source,
-                            winning_authority_rank=authoritative.authority_rank,
-                            cache_write_status=write_result.status.value,
-                        )
+                await self._cache_access.set_many(fresh_values, diagnostics=runtime.diagnostics)
 
             unresolved = [key for key in unresolved if key not in resolved]
             if not unresolved:
