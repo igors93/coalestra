@@ -4,10 +4,17 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from coalestra.core.keys import ResourceKey
-from coalestra.core.models import CacheLookup, FreshnessPolicy, SnapshotValue
+from coalestra.core.models import (
+    CacheLookup,
+    CacheWriteResult,
+    CacheWriteStatus,
+    FreshnessPolicy,
+    SnapshotValue,
+)
 from coalestra.core.protocols import FreshnessPolicyProvider
 
 
@@ -28,7 +35,7 @@ class CacheStats:
 
 
 class AsyncMemoryCache:
-    """Concurrency-safe in-memory LRU cache with batch operations and expiry cleanup."""
+    """Concurrency-safe in-memory LRU cache with atomic monotonic writes."""
 
     def __init__(self, *, max_entries: int | None = 10_000) -> None:
         if max_entries is not None and max_entries < 1:
@@ -112,20 +119,92 @@ class AsyncMemoryCache:
         return results
 
     async def set(self, value: SnapshotValue[Any]) -> None:
-        await self.set_many((value,))
+        await self.set_if_newer(value)
 
     async def set_many(self, values: Collection[SnapshotValue[Any]]) -> None:
-        unique: dict[ResourceKey, SnapshotValue[Any]] = {}
-        for value in values:
-            unique[value.key] = value
-        if not unique:
-            return
+        await self.set_many_if_newer(values)
+
+    async def set_if_newer(
+        self,
+        value: SnapshotValue[Any],
+        *,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> CacheWriteResult:
+        results = await self.set_many_if_newer(
+            (value,),
+            force=force,
+            replace_equal=replace_equal,
+        )
+        return results[value.key]
+
+    async def set_many_if_newer(
+        self,
+        values: Collection[SnapshotValue[Any]],
+        *,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> Mapping[ResourceKey, CacheWriteResult]:
+        candidates = self._select_candidates(values)
+        if not candidates:
+            return MappingProxyType({})
+
+        results: dict[ResourceKey, CacheWriteResult] = {}
         async with self._lock:
-            for value in unique.values():
-                self._entries[value.key] = value
-                self._entries.move_to_end(value.key)
-                self._sets += 1
+            for value in candidates.values():
+                previous = self._entries.get(value.key)
+                status = self._write_status(
+                    previous,
+                    value,
+                    force=force,
+                    replace_equal=replace_equal,
+                )
+
+                if status is CacheWriteStatus.STORED:
+                    self._entries[value.key] = value
+                    self._entries.move_to_end(value.key)
+                    self._sets += 1
+                    current = value
+                else:
+                    assert previous is not None
+                    current = previous
+
+                results[value.key] = CacheWriteResult(
+                    status=status,
+                    value=current,
+                    previous=previous,
+                )
+
             self._enforce_limit_locked()
+
+        return MappingProxyType(results)
+
+    @staticmethod
+    def _select_candidates(
+        values: Collection[SnapshotValue[Any]],
+    ) -> dict[ResourceKey, SnapshotValue[Any]]:
+        selected: dict[ResourceKey, SnapshotValue[Any]] = {}
+        for value in values:
+            current = selected.get(value.key)
+            if current is None or value.observed_at >= current.observed_at:
+                selected[value.key] = value
+        return selected
+
+    @staticmethod
+    def _write_status(
+        previous: SnapshotValue[Any] | None,
+        value: SnapshotValue[Any],
+        *,
+        force: bool,
+        replace_equal: bool,
+    ) -> CacheWriteStatus:
+        if force or previous is None:
+            return CacheWriteStatus.STORED
+        if value.observed_at < previous.observed_at:
+            return CacheWriteStatus.IGNORED_OLDER
+        if value.observed_at == previous.observed_at and not replace_equal:
+            return CacheWriteStatus.IGNORED_DUPLICATE
+        return CacheWriteStatus.STORED
 
     async def invalidate(self, key: ResourceKey) -> None:
         await self.invalidate_many((key,))

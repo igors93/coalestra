@@ -21,6 +21,14 @@ class RefreshMode(str, Enum):
     REFRESH_AHEAD = "refresh_ahead"
 
 
+class CacheWriteStatus(str, Enum):
+    """Outcome of an atomic monotonic cache write."""
+
+    STORED = "stored"
+    IGNORED_OLDER = "ignored_older"
+    IGNORED_DUPLICATE = "ignored_duplicate"
+
+
 @dataclass(frozen=True)
 class FreshnessPolicy:
     """Controls cache reuse, stale fallback and proactive refresh behavior."""
@@ -99,6 +107,23 @@ class SnapshotValue(Generic[T]):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+
+@dataclass(frozen=True)
+class CacheWriteResult:
+    """Result of an atomic monotonic cache write."""
+
+    status: CacheWriteStatus
+    value: SnapshotValue[Any]
+    previous: SnapshotValue[Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.status is not CacheWriteStatus.STORED and self.previous is None:
+            raise ValueError("ignored cache writes must include the previous value")
+
+    @property
+    def stored(self) -> bool:
+        return self.status is CacheWriteStatus.STORED
 
 
 @dataclass(frozen=True)

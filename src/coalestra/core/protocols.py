@@ -6,6 +6,7 @@ from typing import Any, Protocol, runtime_checkable
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheLookup,
+    CacheWriteResult,
     FetchContext,
     FreshnessPolicy,
     Snapshot,
@@ -96,9 +97,10 @@ class FreshnessPolicyProvider(Protocol):
 class AsyncCache(Protocol):
     """Minimal cache contract required by SnapshotBuilder.
 
-    Existing custom caches only need the original single-key methods. Implement
-    :class:`BatchAsyncCache` to let the builder perform one cache operation for a complete set of
-    resources.
+    ``set`` implementations should compare ``observed_at`` and write atomically so an older
+    observation cannot replace a newer one. Legacy caches remain structurally compatible, but
+    they cannot provide the complete monotonicity guarantee until they adopt that behavior.
+    Implement :class:`AtomicAsyncCache` to expose authoritative write results and force options.
     """
 
     async def get(
@@ -118,7 +120,10 @@ class AsyncCache(Protocol):
 
 @runtime_checkable
 class BatchAsyncCache(Protocol):
-    """Optional cache capability for efficient multi-key operations."""
+    """Optional cache capability for efficient monotonic multi-key operations.
+
+    ``set_many`` should perform each timestamp comparison and write atomically in the backend.
+    """
 
     async def get_many(
         self,
@@ -131,6 +136,32 @@ class BatchAsyncCache(Protocol):
     async def set_many(self, values: Collection[SnapshotValue[Any]]) -> None: ...
 
     async def invalidate_many(self, keys: Collection[ResourceKey]) -> None: ...
+
+
+@runtime_checkable
+class AtomicAsyncCache(AsyncCache, Protocol):
+    """Optional capability for atomic monotonic single-resource writes."""
+
+    async def set_if_newer(
+        self,
+        value: SnapshotValue[Any],
+        *,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> CacheWriteResult: ...
+
+
+@runtime_checkable
+class BatchAtomicAsyncCache(BatchAsyncCache, Protocol):
+    """Optional capability for atomic monotonic multi-resource writes."""
+
+    async def set_many_if_newer(
+        self,
+        values: Collection[SnapshotValue[Any]],
+        *,
+        force: bool = False,
+        replace_equal: bool = False,
+    ) -> Mapping[ResourceKey, CacheWriteResult]: ...
 
 
 class EventSink(Protocol):

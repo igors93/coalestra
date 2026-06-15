@@ -23,6 +23,8 @@ from coalestra.core.keys import (
 )
 from coalestra.core.models import (
     CacheLookup,
+    CacheWriteResult,
+    CacheWriteStatus,
     FetchContext,
     FreshnessPolicy,
     RefreshMode,
@@ -32,7 +34,9 @@ from coalestra.core.models import (
 )
 from coalestra.core.protocols import (
     AsyncCache,
+    AtomicAsyncCache,
     BatchAsyncCache,
+    BatchAtomicAsyncCache,
     BatchSizedSource,
     BatchSnapshotSource,
     Clock,
@@ -54,11 +58,15 @@ __all__ = [
     "LEGACY_KEY_NORMALIZER",
     "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
+    "AtomicAsyncCache",
     "BatchAsyncCache",
+    "BatchAtomicAsyncCache",
     "BatchSizedSource",
     "BatchSnapshotSource",
     "BuilderHealth",
     "CacheLookup",
+    "CacheWriteResult",
+    "CacheWriteStatus",
     "CircuitOpenError",
     "Clock",
     "CoalestraError",

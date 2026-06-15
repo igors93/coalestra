@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
-from coalestra import AsyncMemoryCache, FreshnessPolicy, ResourceKey, SnapshotValue
+from coalestra import (
+    AsyncMemoryCache,
+    CacheWriteStatus,
+    FreshnessPolicy,
+    ResourceKey,
+    SnapshotValue,
+)
 
 KEY_A = ResourceKey("test", "value", "A")
 KEY_B = ResourceKey("test", "value", "B")
@@ -13,6 +19,24 @@ def value(key: ResourceKey, observed_at: float) -> SnapshotValue[int]:
     return SnapshotValue(
         key=key,
         value=1,
+        source="test",
+        observed_at=observed_at,
+        fetched_at=observed_at,
+        age_seconds=0.0,
+        stale=False,
+        from_cache=False,
+        latency_ms=0.0,
+    )
+
+
+def text_value(
+    key: ResourceKey,
+    payload: str,
+    observed_at: float,
+) -> SnapshotValue[str]:
+    return SnapshotValue(
+        key=key,
+        value=payload,
         source="test",
         observed_at=observed_at,
         fetched_at=observed_at,
@@ -71,6 +95,53 @@ def test_cache_namespace_invalidation_and_lru_eviction() -> None:
         stats = await cache.stats()
         assert stats.evictions == 1
         assert stats.invalidations == 1
+
+    asyncio.run(scenario())
+
+
+def test_memory_cache_writes_are_atomic_and_monotonic() -> None:
+    async def scenario() -> None:
+        cache = AsyncMemoryCache()
+        policy = FreshnessPolicy(1000.0, 1000.0)
+
+        newest = text_value(KEY_A, "new", 200.0)
+        older = text_value(KEY_A, "old", 100.0)
+        duplicate = text_value(KEY_A, "duplicate", 200.0)
+
+        stored = await cache.set_if_newer(newest)
+        ignored_older = await cache.set_if_newer(older)
+        ignored_duplicate = await cache.set_if_newer(duplicate)
+
+        lookup = await cache.get(KEY_A, now=200.0, policy=policy)
+
+        assert stored.status is CacheWriteStatus.STORED
+        assert ignored_older.status is CacheWriteStatus.IGNORED_OLDER
+        assert ignored_duplicate.status is CacheWriteStatus.IGNORED_DUPLICATE
+        assert lookup.value is newest
+        assert (await cache.stats()).sets == 1
+
+        forced = await cache.set_if_newer(older, force=True)
+        assert forced.status is CacheWriteStatus.STORED
+        assert (await cache.get(KEY_A, now=200.0, policy=policy)).value is older
+
+    asyncio.run(scenario())
+
+
+def test_batch_write_selects_newest_duplicate_regardless_of_input_order() -> None:
+    async def scenario() -> None:
+        cache = AsyncMemoryCache()
+        policy = FreshnessPolicy(1000.0, 1000.0)
+        older = text_value(KEY_A, "old", 100.0)
+        newest = text_value(KEY_A, "new", 200.0)
+
+        await cache.set_many_if_newer((newest, older))
+        first = await cache.get(KEY_A, now=200.0, policy=policy)
+        assert first.value is newest
+
+        await cache.clear()
+        await cache.set_many_if_newer((older, newest))
+        second = await cache.get(KEY_A, now=200.0, policy=policy)
+        assert second.value is newest
 
     asyncio.run(scenario())
 

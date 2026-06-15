@@ -10,10 +10,17 @@ from typing import Any, Generic, TypeVar, cast
 
 from coalestra.core.errors import SourceProtocolError
 from coalestra.core.keys import ResourceKey
-from coalestra.core.models import FreshnessPolicy, SnapshotValue
+from coalestra.core.models import (
+    CacheWriteResult,
+    CacheWriteStatus,
+    FreshnessPolicy,
+    SnapshotValue,
+)
 from coalestra.core.protocols import (
     AsyncCache,
+    AtomicAsyncCache,
     BatchAsyncCache,
+    BatchAtomicAsyncCache,
     Clock,
     EventSink,
     FreshnessPolicyProvider,
@@ -65,7 +72,7 @@ class ResourcePublisher:
     """Publish event-stream or in-process state directly into a Coalestra cache.
 
     Publications are monotonic by ``observed_at`` by default. Bulk publication acquires striped
-    locks in a stable order and uses cache batch operations when available.
+    locks in a stable order and uses authoritative atomic cache operations when available.
     """
 
     def __init__(
@@ -155,34 +162,19 @@ class ResourcePublisher:
                     effective_times[update.key] = observed_at
 
             previous_values = await self._get_existing(keys, now=now)
-            results: dict[ResourceKey, PublishResult] = {}
-            pending_writes: list[SnapshotValue[Any]] = []
+            provisional_results: dict[ResourceKey, PublishResult] = {}
+            candidates: list[SnapshotValue[Any]] = []
+            legacy_writes: list[SnapshotValue[Any]] = []
 
             for key, update in unique.items():
                 observed_at = now if update.observed_at is None else float(update.observed_at)
                 previous = previous_values.get(key)
-                ignored_status = self._ignored_status(
-                    previous,
-                    observed_at=observed_at,
-                    force=force,
-                    replace_equal=replace_equal,
-                )
-                if ignored_status is not None and previous is not None:
-                    result = PublishResult(
-                        status=ignored_status,
-                        value=previous,
-                        previous=previous,
-                    )
-                    results[key] = result
-                    self._record_ignored(result, update)
-                    continue
-
                 policy = self.policy_resolver.resolve(key)
                 future_seconds = max(0.0, observed_at - now)
                 published_metadata = {**update.metadata, "published": True}
                 if future_seconds > 0:
                     published_metadata["clock_skew_seconds"] = future_seconds
-                published = SnapshotValue(
+                candidate = SnapshotValue(
                     key=key,
                     value=update.value,
                     source=update.source,
@@ -195,17 +187,52 @@ class ResourcePublisher:
                     attempts=0,
                     metadata=published_metadata,
                 )
-                pending_writes.append(published)
-                results[key] = PublishResult(
+                candidates.append(candidate)
+
+                ignored_status = self._ignored_status(
+                    previous,
+                    observed_at=observed_at,
+                    force=force,
+                    replace_equal=replace_equal,
+                )
+                if ignored_status is not None and previous is not None:
+                    provisional_results[key] = PublishResult(
+                        status=ignored_status,
+                        value=previous,
+                        previous=previous,
+                    )
+                    continue
+
+                legacy_writes.append(candidate)
+                provisional_results[key] = PublishResult(
                     status=PublishStatus.PUBLISHED,
-                    value=published,
+                    value=candidate,
                     previous=previous,
                 )
 
-            await self._set_many(pending_writes)
+            atomic_results = await self._set_many_if_newer(
+                candidates,
+                force=force,
+                replace_equal=replace_equal,
+            )
+            if atomic_results is None:
+                await self._set_many_legacy(legacy_writes)
+                results = provisional_results
+            else:
+                missing = tuple(key for key in unique if key not in atomic_results)
+                if missing:
+                    rendered = ", ".join(str(key) for key in missing)
+                    raise RuntimeError(f"atomic cache omitted write results for: {rendered}")
+                results = {
+                    key: self._publish_result_from_cache(atomic_results[key]) for key in unique
+                }
+
             for key, result in results.items():
+                update = unique[key]
                 if result.published:
-                    self._record_published(result, unique[key], force=force)
+                    self._record_published(result, update, force=force)
+                else:
+                    self._record_ignored(result, update)
             return MappingProxyType(results)
 
     async def invalidate(self, key: ResourceKey, *, reason: str = "") -> None:
@@ -245,13 +272,55 @@ class ResourcePublisher:
             lookups = dict(zip(keys, completed, strict=True))
         return {key: lookups[key].value for key in keys}
 
-    async def _set_many(self, values: Collection[SnapshotValue[Any]]) -> None:
+    async def _set_many_if_newer(
+        self,
+        values: Collection[SnapshotValue[Any]],
+        *,
+        force: bool,
+        replace_equal: bool,
+    ) -> Mapping[ResourceKey, CacheWriteResult] | None:
+        if not values:
+            return MappingProxyType({})
+        if isinstance(self.cache, BatchAtomicAsyncCache):
+            return await self.cache.set_many_if_newer(
+                values,
+                force=force,
+                replace_equal=replace_equal,
+            )
+        if isinstance(self.cache, AtomicAsyncCache):
+            completed = await asyncio.gather(
+                *(
+                    self.cache.set_if_newer(
+                        value,
+                        force=force,
+                        replace_equal=replace_equal,
+                    )
+                    for value in values
+                )
+            )
+            return MappingProxyType({result.value.key: result for result in completed})
+        return None
+
+    async def _set_many_legacy(self, values: Collection[SnapshotValue[Any]]) -> None:
         if not values:
             return
         if isinstance(self.cache, BatchAsyncCache):
             await self.cache.set_many(values)
         else:
             await asyncio.gather(*(self.cache.set(value) for value in values))
+
+    @staticmethod
+    def _publish_result_from_cache(result: CacheWriteResult) -> PublishResult:
+        statuses = {
+            CacheWriteStatus.STORED: PublishStatus.PUBLISHED,
+            CacheWriteStatus.IGNORED_OLDER: PublishStatus.IGNORED_OLDER,
+            CacheWriteStatus.IGNORED_DUPLICATE: PublishStatus.IGNORED_DUPLICATE,
+        }
+        return PublishResult(
+            status=statuses[result.status],
+            value=result.value,
+            previous=result.previous,
+        )
 
     def _validate_observed_at(
         self,

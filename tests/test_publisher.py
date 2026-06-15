@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from coalestra import (
+    AsyncMemoryCache,
     CallableSource,
+    FreshnessPolicy,
     PublishStatus,
     ResourceKey,
     ResourceUpdate,
     SnapshotBuilder,
+    SourcePayload,
     SyncSnapshotBuilder,
 )
 
@@ -140,6 +144,128 @@ def test_session_values_remain_pinned_after_publication() -> None:
         return pinned.value(KEY, str), fresh.value(KEY, str)
 
     assert asyncio.run(scenario()) == ("v1", "v2")
+
+
+def test_late_source_result_cannot_overwrite_newer_publication() -> None:
+    async def scenario() -> tuple[str, str]:
+        source_started = asyncio.Event()
+        release_source = asyncio.Event()
+        published_at = time.time()
+
+        async def fetch(_key, _context):
+            source_started.set()
+            await release_source.wait()
+            return SourcePayload(
+                value="old-source",
+                observed_at=published_at - 0.1,
+            )
+
+        builder = SnapshotBuilder(
+            [
+                CallableSource(
+                    name="remote",
+                    priority=1,
+                    supports=lambda _key: True,
+                    fetcher=fetch,
+                )
+            ],
+            default_policy=FreshnessPolicy(60.0, 60.0),
+        )
+
+        build_task = asyncio.create_task(builder.build([KEY]))
+        await source_started.wait()
+
+        await builder.publisher.publish(
+            KEY,
+            "new-stream",
+            source="stream",
+            observed_at=published_at,
+        )
+
+        release_source.set()
+        in_flight_snapshot = await build_task
+        next_snapshot = await builder.build([KEY])
+        return (
+            in_flight_snapshot.value(KEY, str),
+            next_snapshot.value(KEY, str),
+        )
+
+    assert asyncio.run(scenario()) == ("old-source", "new-stream")
+
+
+def test_concurrent_publishers_report_authoritative_atomic_result() -> None:
+    class CoordinatedCache(AsyncMemoryCache):
+        def __init__(self) -> None:
+            super().__init__()
+            self._initial_reads = 0
+            self._both_read = asyncio.Event()
+            self._new_written = asyncio.Event()
+
+        async def get_many(self, keys, *, now, policies):
+            results = await super().get_many(keys, now=now, policies=policies)
+            self._initial_reads += 1
+            if self._initial_reads == 2:
+                self._both_read.set()
+            elif self._initial_reads == 1:
+                await self._both_read.wait()
+            return results
+
+        async def set_many_if_newer(
+            self,
+            values,
+            *,
+            force=False,
+            replace_equal=False,
+        ):
+            items = tuple(values)
+            if items and items[0].value == "old":
+                await self._new_written.wait()
+            results = await super().set_many_if_newer(
+                items,
+                force=force,
+                replace_equal=replace_equal,
+            )
+            if items and items[0].value == "new":
+                self._new_written.set()
+            return results
+
+    async def scenario() -> tuple[PublishStatus, PublishStatus, str]:
+        cache = CoordinatedCache()
+        source = CallableSource(
+            name="remote",
+            priority=1,
+            supports=lambda _key: True,
+            fetcher=lambda _key, _context: "remote",
+        )
+        newer_builder = SnapshotBuilder([source], cache=cache)
+        older_builder = SnapshotBuilder([source], cache=cache)
+        now = time.time()
+
+        newer_task = asyncio.create_task(
+            newer_builder.publisher.publish(
+                KEY,
+                "new",
+                source="new-stream",
+                observed_at=now,
+            )
+        )
+        older_task = asyncio.create_task(
+            older_builder.publisher.publish(
+                KEY,
+                "old",
+                source="old-stream",
+                observed_at=now - 1.0,
+            )
+        )
+        newer, older = await asyncio.gather(newer_task, older_task)
+        snapshot = await newer_builder.build([KEY])
+        return newer.status, older.status, snapshot.value(KEY, str)
+
+    assert asyncio.run(scenario()) == (
+        PublishStatus.PUBLISHED,
+        PublishStatus.IGNORED_OLDER,
+        "new",
+    )
 
 
 def test_sync_publisher_supports_blocking_and_non_blocking_updates() -> None:
