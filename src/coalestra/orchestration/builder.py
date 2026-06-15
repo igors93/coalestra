@@ -20,6 +20,7 @@ from coalestra.core.errors import (
 from coalestra.core.health import BuilderHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
+    CacheWriteStatus,
     FetchContext,
     FreshnessPolicy,
     RefreshMode,
@@ -692,7 +693,24 @@ class SnapshotBuilder:
                 )
 
             if fresh_values:
-                await self._cache_access.set_many(fresh_values, diagnostics=runtime.diagnostics)
+                write_results = await self._cache_access.set_many(
+                    fresh_values,
+                    diagnostics=runtime.diagnostics,
+                )
+                if write_results:
+                    for written in fresh_values:
+                        result = write_results.get(written.key)
+                        if (
+                            result is not None
+                            and result.status is CacheWriteStatus.IGNORED_LOWER_AUTHORITY
+                        ):
+                            winning = self._cache_access.cached_copy(
+                                result.value,
+                                stale=False,
+                                extra_metadata={"superseded_source": written.source},
+                            )
+                            runtime.memo[written.key] = winning
+                            resolved[written.key] = ResolutionResult(value=winning)
 
             unresolved = [key for key in unresolved if key not in resolved]
             if not unresolved:
