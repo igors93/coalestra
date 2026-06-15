@@ -20,6 +20,8 @@ from coalestra.concurrency import (
 )
 from coalestra.core import (
     CASE_INSENSITIVE_KEY_NORMALIZER,
+    ERROR_DIAGNOSTICS_SCHEMA,
+    ERROR_DIAGNOSTICS_SCHEMA_VERSION,
     LEGACY_KEY_NORMALIZER,
     PRESERVE_KEY_NORMALIZER,
     AsyncCache,
@@ -54,6 +56,9 @@ from coalestra.core import (
     ResilienceConfiguredSource,
     ResourceKey,
     ResourceResolutionError,
+    SerializedResourceError,
+    SerializedSnapshotBuildError,
+    SerializedSourceFailure,
     SessionClosedError,
     Snapshot,
     SnapshotBuildError,
@@ -106,10 +111,12 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
+    "ERROR_DIAGNOSTICS_SCHEMA",
+    "ERROR_DIAGNOSTICS_SCHEMA_VERSION",
     "LEGACY_KEY_NORMALIZER",
     "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
@@ -175,6 +182,9 @@ __all__ = [
     "ResourceResolutionError",
     "ResourceUpdate",
     "RetryPolicy",
+    "SerializedResourceError",
+    "SerializedSnapshotBuildError",
+    "SerializedSourceFailure",
     "SessionClosedError",
     "Snapshot",
     "SnapshotBuildError",

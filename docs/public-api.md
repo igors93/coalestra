@@ -251,13 +251,44 @@ Additional event types include:
 - `CoalestraError`
 - `SourceUnavailableError`
 - `SourceTimeoutError`
+- `SourceQueueTimeoutError`
+- `SnapshotDeadlineExceededError`
 - `SourceProtocolError`
 - `CircuitOpenError`
 - `DependencyCycleError`
 - `DependencyResolutionError`
+- `PayloadIsolationError`
 - `ResourceResolutionError`
 - `SnapshotBuildError`
 - `SessionClosedError`
+- `SubmissionBacklogFullError`
+
+### Serialized error diagnostics
+
+The following APIs return stable JSON-safe dictionaries:
+
+```python
+SourceFailure.to_dict() -> SerializedSourceFailure
+ResourceResolutionError.to_dict() -> SerializedResourceError
+SnapshotBuildError.to_dict() -> SerializedSnapshotBuildError
+```
+
+Every serialized object includes:
+
+- `schema`, currently equal to `ERROR_DIAGNOSTICS_SCHEMA`;
+- `schema_version`, currently equal to `ERROR_DIAGNOSTICS_SCHEMA_VERSION`;
+- `error_type`;
+- a bounded string `message`.
+
+Resource diagnostics also include `resource` and a `failures` list. Source failures include `source` and `attempts`. Snapshot-build diagnostics include `errors` and the canonical `partial_snapshot_available` field. Schema version 1 retains `has_partial_snapshot` as a compatibility alias for Coalestra 0.5.1-0.5.4 consumers. Consumers should reject unknown schema names, handle supported versions explicitly, and ignore unknown fields within a supported version.
+
+Public schema types and constants:
+
+- `ERROR_DIAGNOSTICS_SCHEMA`
+- `ERROR_DIAGNOSTICS_SCHEMA_VERSION`
+- `SerializedSourceFailure`
+- `SerializedResourceError`
+- `SerializedSnapshotBuildError`
 
 ## Resource identity in 0.4
 

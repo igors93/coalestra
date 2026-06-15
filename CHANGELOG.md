@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+## 0.5.5 - 2026-06-15
+
 - Added bounded non-blocking publication and invalidation submissions to the synchronous facade.
 - Added bulk submission, backlog inspection, explicit flush, deterministic shutdown draining, and call-time payload capture.
 - Added `SubmissionBacklogFullError` when a producer exceeds the configured backlog limit.
 - Bounded single-key custom-cache read, write, atomic-write, and invalidation fallbacks with the existing `max_pending_tasks` worker limit.
+- Added a stable, versioned, JSON-safe error-diagnostics schema for source, resource, and snapshot build failures.
+- Added canonical `partial_snapshot_available` while retaining `has_partial_snapshot` as a schema-version-1 compatibility alias.
 
 ## 0.5.4 - 2026-06-15
 

@@ -4,6 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from coalestra.core.diagnostic_schema import (
+    ERROR_DIAGNOSTICS_SCHEMA,
+    ERROR_DIAGNOSTICS_SCHEMA_VERSION,
+    SerializedResourceError,
+    SerializedSnapshotBuildError,
+    SerializedSourceFailure,
+)
 from coalestra.core.models import ResourceKey
 
 _DEFAULT_MESSAGE_LIMIT = 300
@@ -139,8 +146,10 @@ class SourceFailure:
         self,
         *,
         max_message_length: int = _DEFAULT_MESSAGE_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> SerializedSourceFailure:
         return {
+            "schema": ERROR_DIAGNOSTICS_SCHEMA,
+            "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
             "source": self.source,
             "error_type": self.error_type,
             "message": _compact_message(
@@ -194,8 +203,10 @@ class ResourceResolutionError(CoalestraError):
         self,
         *,
         max_message_length: int = _DEFAULT_MESSAGE_LIMIT,
-    ) -> dict[str, Any]:
+    ) -> SerializedResourceError:
         return {
+            "schema": ERROR_DIAGNOSTICS_SCHEMA,
+            "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
             "resource": str(self.key),
             "error_type": type(self).__name__,
             "message": _compact_message(
@@ -264,8 +275,8 @@ class SnapshotBuildError(CoalestraError):
         self,
         *,
         max_message_length: int = _DEFAULT_MESSAGE_LIMIT,
-    ) -> dict[str, Any]:
-        details: list[dict[str, Any]] = []
+    ) -> SerializedSnapshotBuildError:
+        details: list[SerializedResourceError] = []
 
         for key, error in self.errors.items():
             if isinstance(error, ResourceResolutionError):
@@ -278,6 +289,8 @@ class SnapshotBuildError(CoalestraError):
 
             details.append(
                 {
+                    "schema": ERROR_DIAGNOSTICS_SCHEMA,
+                    "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
                     "resource": str(key),
                     "error_type": type(error).__name__,
                     "message": _compact_message(
@@ -288,12 +301,17 @@ class SnapshotBuildError(CoalestraError):
                 }
             )
 
+        partial_snapshot_available = self.snapshot is not None
         return {
+            "schema": ERROR_DIAGNOSTICS_SCHEMA,
+            "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
             "error_type": type(self).__name__,
             "message": _compact_message(
                 self,
                 max_length=max_message_length,
             ),
-            "has_partial_snapshot": self.snapshot is not None,
+            "partial_snapshot_available": partial_snapshot_available,
+            # Kept in schema version 1 for compatibility with Coalestra 0.5.1-0.5.4.
+            "has_partial_snapshot": partial_snapshot_available,
             "errors": details,
         }

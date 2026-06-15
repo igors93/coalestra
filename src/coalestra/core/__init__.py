@@ -4,6 +4,13 @@ from coalestra.core.authority import (
     SourceAuthorityPolicy,
 )
 from coalestra.core.clock import SystemClock
+from coalestra.core.diagnostic_schema import (
+    ERROR_DIAGNOSTICS_SCHEMA,
+    ERROR_DIAGNOSTICS_SCHEMA_VERSION,
+    SerializedResourceError,
+    SerializedSnapshotBuildError,
+    SerializedSourceFailure,
+)
 from coalestra.core.diagnostics import DiagnosticsCollector, SnapshotDiagnostics
 from coalestra.core.errors import (
     CircuitOpenError,
@@ -67,6 +74,8 @@ from coalestra.core.request import SnapshotRequest
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
+    "ERROR_DIAGNOSTICS_SCHEMA",
+    "ERROR_DIAGNOSTICS_SCHEMA_VERSION",
     "LEGACY_KEY_NORMALIZER",
     "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
@@ -105,6 +114,9 @@ __all__ = [
     "ResilienceConfiguredSource",
     "ResourceKey",
     "ResourceResolutionError",
+    "SerializedResourceError",
+    "SerializedSnapshotBuildError",
+    "SerializedSourceFailure",
     "SessionClosedError",
     "Snapshot",
     "SnapshotBuildError",

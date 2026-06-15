@@ -1,8 +1,11 @@
 import asyncio
+import json
 
 import pytest
 
 from coalestra import (
+    ERROR_DIAGNOSTICS_SCHEMA,
+    ERROR_DIAGNOSTICS_SCHEMA_VERSION,
     CallableSource,
     ResourceKey,
     ResourceResolutionError,
@@ -65,16 +68,23 @@ def test_snapshot_build_error_exposes_structured_diagnostics():
     )
 
     assert error.to_dict() == {
+        "schema": ERROR_DIAGNOSTICS_SCHEMA,
+        "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
         "error_type": "SnapshotBuildError",
         "message": str(error),
+        "partial_snapshot_available": True,
         "has_partial_snapshot": True,
         "errors": [
             {
+                "schema": ERROR_DIAGNOSTICS_SCHEMA,
+                "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
                 "resource": "exchange:info",
                 "error_type": "ResourceResolutionError",
                 "message": str(resource_error),
                 "failures": [
                     {
+                        "schema": ERROR_DIAGNOSTICS_SCHEMA,
+                        "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
                         "source": "rest",
                         "error_type": "ConnectTimeout",
                         "message": ("TLS handshake exceeded the connection budget"),
@@ -147,10 +157,64 @@ def test_builder_failure_keeps_source_details_available():
     assert diagnostic["errors"][0]["resource"] == ("exchange:info")
 
     assert diagnostic["errors"][0]["failures"][0] == {
+        "schema": ERROR_DIAGNOSTICS_SCHEMA,
+        "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
         "source": "rest-exchange",
         "error_type": "SourceUnavailableError",
         "message": "synthetic connect timeout",
         "attempts": 2,
+    }
+
+
+def test_serialized_diagnostics_are_json_safe_and_versioned():
+    key = ResourceKey("account", "positions")
+    error = SnapshotBuildError(
+        {
+            key: ResourceResolutionError(
+                key,
+                (
+                    SourceFailure(
+                        source="user-data-stream",
+                        error_type="SourceQueueTimeoutError",
+                        message="capacity queue exhausted",
+                        attempts=1,
+                    ),
+                ),
+            )
+        },
+        snapshot=object(),
+    )
+
+    diagnostic = error.to_dict()
+    encoded = json.dumps(diagnostic, sort_keys=True)
+
+    assert ERROR_DIAGNOSTICS_SCHEMA in encoded
+    assert diagnostic["schema_version"] == 1
+    assert diagnostic["partial_snapshot_available"] is True
+    assert diagnostic["has_partial_snapshot"] is diagnostic["partial_snapshot_available"]
+    assert diagnostic["errors"][0]["schema_version"] == 1
+    assert diagnostic["errors"][0]["failures"][0]["schema_version"] == 1
+
+
+def test_generic_resource_errors_use_the_same_stable_envelope():
+    key = ResourceKey("account", "balance")
+    error = SnapshotBuildError(
+        {key: ValueError("invalid account payload")},
+        snapshot=None,
+    )
+
+    diagnostic = error.to_dict()
+    resource = diagnostic["errors"][0]
+
+    assert diagnostic["partial_snapshot_available"] is False
+    assert diagnostic["has_partial_snapshot"] is False
+    assert resource == {
+        "schema": ERROR_DIAGNOSTICS_SCHEMA,
+        "schema_version": ERROR_DIAGNOSTICS_SCHEMA_VERSION,
+        "resource": "account:balance",
+        "error_type": "ValueError",
+        "message": "invalid account payload",
+        "failures": [],
     }
 
 

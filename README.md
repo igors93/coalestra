@@ -55,6 +55,23 @@ snapshot = await builder.build_request(request, deadline_seconds=3.0)
 
 Only required failures raise `SnapshotBuildError`. The exception exposes a partial `snapshot`, so already resolved values and diagnostics are not lost. Sessions and synchronous facades expose the same request API.
 
+### Versioned error diagnostics
+
+`SourceFailure.to_dict()`, `ResourceResolutionError.to_dict()`, and `SnapshotBuildError.to_dict()` return a stable JSON-safe schema identified by `ERROR_DIAGNOSTICS_SCHEMA` and `ERROR_DIAGNOSTICS_SCHEMA_VERSION`. Consumers should branch on `schema_version` and ignore unknown fields so future additive changes remain compatible.
+
+```python
+from coalestra import ERROR_DIAGNOSTICS_SCHEMA_VERSION, SnapshotBuildError
+
+try:
+    snapshot = await builder.build_request(request)
+except SnapshotBuildError as error:
+    diagnostic = error.to_dict()
+    assert diagnostic["schema_version"] == ERROR_DIAGNOSTICS_SCHEMA_VERSION
+    send_to_observability(diagnostic)
+```
+
+`partial_snapshot_available` is the canonical field. Schema version 1 also includes the legacy `has_partial_snapshot` alias for consumers created against Coalestra 0.5.1-0.5.4. Serialized diagnostics contain only strings, integers, booleans, lists, and dictionaries; Python exception objects are never included.
+
 ## Fast local sources and bounded batches
 
 Synchronous adapters run in worker threads by default. Lock-protected, non-blocking in-memory reads can opt into inline execution:
@@ -330,7 +347,7 @@ Every `SnapshotValue` carries an opaque resource version. Derived values record 
 
 ## Global and per-source capacity
 
-`max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity. `max_pending_tasks` bounds the fixed worker pools used for individual and derived source dispatch and for single-key custom-cache fallbacks. This prevents one large request or publication from creating one asyncio task per key. It defaults to `max_concurrency`.
+`max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity. `max_pending_tasks` bounds the fixed worker pool used to dispatch individual and derived resources, preventing one large request from creating one asyncio task per key. It defaults to `max_concurrency`.
 
 ```python
 builder = SnapshotBuilder(
@@ -356,7 +373,7 @@ rest_source = CallableSource(
 )
 ```
 
-An explicit `source_concurrency` entry overrides the limit declared by the source. Batch calls consume one slot regardless of batch size. Derivation consumes a slot only while the derivation function itself runs; dependency acquisition uses its own source slots. Individual and derived dispatch preserve input ordering while using at most `max_pending_tasks` workers per source attempt. Custom caches implementing `BatchAsyncCache` keep their native bulk path; single-key custom caches use the same worker limit for reads, writes, atomic writes, and invalidations. Values above `max_concurrency` permit a bounded number of workers to wait during retries or capacity contention; lower values deliberately reduce dispatch and cache-fallback parallelism.
+An explicit `source_concurrency` entry overrides the limit declared by the source. Batch calls consume one slot regardless of batch size. Derivation consumes a slot only while the derivation function itself runs; dependency acquisition uses its own source slots. Individual and derived dispatch preserve input ordering while using at most `max_pending_tasks` workers per source attempt. Values above `max_concurrency` permit a bounded number of workers to wait during retries or capacity contention; lower values deliberately reduce dispatch parallelism.
 
 ## Source-specific resilience and circuit scopes
 
@@ -400,8 +417,6 @@ Policies can also be supplied centrally through `source_resilience` or a `Resili
 ## Direct event publication
 
 A long-lived builder exposes a `ResourcePublisher` backed by the same cache used by snapshot acquisition.
-Builder-created publishers inherit `max_pending_tasks`. A standalone `ResourcePublisher` accepts the same option, defaulting to 8, to bound fallback operations when its cache does not implement batch methods.
-
 
 ```python
 await builder.publisher.publish(
