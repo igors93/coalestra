@@ -154,6 +154,7 @@ force=True       -> publish regardless
 Publication does not mutate existing session memos. This preserves session consistency. A new build or session reads the updated cache.
 
 Invalidation removes a resource from the shared cache, causing normal source resolution on the next request.
+Publisher reads, writes, atomic writes, and invalidations use fixed-worker fallbacks when a custom cache exposes only single-key methods. Builder-created publishers inherit the builder `max_pending_tasks` limit.
 
 ## Cache model
 
@@ -222,7 +223,7 @@ The cache path mirrors source batching:
 5. Fresh source results are grouped into `set_many` operations.
 6. Older-than-`max_stale_seconds` memory entries are removed during lookup.
 
-Single-key custom caches remain supported through concurrent fallback calls.
+Single-key custom caches remain supported through ordered fixed-worker fallbacks bounded by `max_pending_tasks`. Reads, writes, atomic writes, and invalidations therefore avoid creating one task per key. Caches implementing `BatchAsyncCache` or `BatchAtomicAsyncCache` continue to use their native bulk operations.
 
 ## Refresh state machine
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Collection
 from functools import partial
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Protocol, cast
 
+from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.errors import (
     CircuitOpenError,
     DependencyCycleError,
@@ -20,9 +21,6 @@ from coalestra.orchestration.runtime import ResolutionRuntime, SourceAttempt
 from coalestra.orchestration.source_calls import SourceCalls
 from coalestra.orchestration.source_catalog import SourceCatalog
 from coalestra.resilience.retry import run_with_retry
-
-DispatchItem = TypeVar("DispatchItem")
-DispatchResult = TypeVar("DispatchResult")
 
 
 class ResolveMany(Protocol):
@@ -223,7 +221,11 @@ class SourceExecutor:
                     latency_ms=self.calls.elapsed_ms(started),
                 )
 
-        completed = await self._run_bounded(keys, fetch_one)
+        completed = await run_bounded(
+            keys,
+            fetch_one,
+            max_tasks=self.max_pending_tasks,
+        )
         for _key, attempt in completed:
             runtime.diagnostics.record_source_latency(
                 source.name,
@@ -623,44 +625,14 @@ class SourceExecutor:
                     latency_ms=self.calls.elapsed_ms(started),
                 )
 
-        completed = await self._run_bounded(keys, derive_one)
+        completed = await run_bounded(
+            keys,
+            derive_one,
+            max_tasks=self.max_pending_tasks,
+        )
         for _key, attempt in completed:
             runtime.diagnostics.record_source_latency(
                 source.name,
                 attempt.latency_ms,
             )
         return dict(completed)
-
-    async def _run_bounded(
-        self,
-        items: Collection[DispatchItem],
-        operation: Callable[[DispatchItem], Awaitable[DispatchResult]],
-    ) -> tuple[DispatchResult, ...]:
-        """Run work through a fixed worker set instead of one task per item."""
-
-        ordered = tuple(items)
-        if not ordered:
-            return ()
-
-        worker_count = min(self.max_pending_tasks, len(ordered))
-        results: dict[int, DispatchResult] = {}
-        next_index = 0
-
-        async def worker() -> None:
-            nonlocal next_index
-
-            while next_index < len(ordered):
-                index = next_index
-                next_index += 1
-                results[index] = await operation(ordered[index])
-
-        workers = tuple(asyncio.create_task(worker()) for _ in range(worker_count))
-        try:
-            await asyncio.gather(*workers)
-        except BaseException:
-            for worker_task in workers:
-                worker_task.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
-            raise
-
-        return tuple(results[index] for index in range(len(ordered)))

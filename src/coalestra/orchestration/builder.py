@@ -20,7 +20,6 @@ from coalestra.core.errors import (
 from coalestra.core.health import BuilderHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
-    CacheWriteStatus,
     FetchContext,
     FreshnessPolicy,
     RefreshMode,
@@ -162,6 +161,7 @@ class SnapshotBuilder:
             cache=self.cache,
             clock=self.clock,
             payload_isolator=self._payload_isolator,
+            max_pending_tasks=self.max_pending_tasks,
         )
         self._source_calls = SourceCalls(
             clock=self.clock,
@@ -199,6 +199,7 @@ class SnapshotBuilder:
             observation_policy=self.observation_policy,
             payload_isolator=self._payload_isolator,
             authority_resolver=self.authority_resolver,
+            max_pending_tasks=self.max_pending_tasks,
         )
 
     @property
@@ -693,24 +694,12 @@ class SnapshotBuilder:
                 )
 
             if fresh_values:
-                write_results = await self._cache_access.set_many(
-                    fresh_values,
-                    diagnostics=runtime.diagnostics,
+                superseded = await self._check_authority_supersession(
+                    fresh_values, runtime=runtime, resolved=resolved
                 )
-                if write_results:
-                    for written in fresh_values:
-                        result = write_results.get(written.key)
-                        if (
-                            result is not None
-                            and result.status is CacheWriteStatus.IGNORED_LOWER_AUTHORITY
-                        ):
-                            winning = self._cache_access.cached_copy(
-                                result.value,
-                                stale=False,
-                                extra_metadata={"superseded_source": written.source},
-                            )
-                            runtime.memo[written.key] = winning
-                            resolved[written.key] = ResolutionResult(value=winning)
+                to_cache = [v for v in fresh_values if v.key not in superseded]
+                if to_cache:
+                    await self._cache_access.set_many(to_cache, diagnostics=runtime.diagnostics)
 
             unresolved = [key for key in unresolved if key not in resolved]
             if not unresolved:
@@ -737,6 +726,60 @@ class SnapshotBuilder:
         if stale_to_cache and runtime.cache_stale_results:
             await self._cache_access.set_many(stale_to_cache, diagnostics=runtime.diagnostics)
         return resolved
+
+    async def _check_authority_supersession(
+        self,
+        fresh_values: list[SnapshotValue[Any]],
+        *,
+        runtime: ResolutionRuntime,
+        resolved: dict[ResourceKey, ResolutionResult],
+    ) -> frozenset[ResourceKey]:
+        """Detect source results that were superseded by a concurrent higher-authority publication.
+
+        When a high-authority value is published while a source fetch is in flight, the cache
+        already holds the authoritative result by the time the source returns. This method reads
+        those cached values and, for any key where the cached authority rank exceeds the source
+        result's rank, replaces the tentative resolution with the cached value and annotates it
+        with ``superseded_source``.
+        """
+        if not self.authority_resolver.has_rules:
+            return frozenset()
+
+        fresh_by_key = {v.key: v for v in fresh_values}
+        all_values_policy = FreshnessPolicy(
+            ttl_seconds=float("inf"),
+            max_stale_seconds=float("inf"),
+        )
+        lookups = await self._cache_access.get_many(
+            list(fresh_by_key),
+            now=self.clock.now(),
+            policies=dict.fromkeys(fresh_by_key, all_values_policy),
+            diagnostics=runtime.diagnostics,
+        )
+        superseded: set[ResourceKey] = set()
+        for key, source_value in fresh_by_key.items():
+            lookup = lookups[key]
+            if (
+                lookup.value is not None
+                and lookup.value.authority_rank > source_value.authority_rank
+            ):
+                cached = self._cache_access.cached_copy(
+                    lookup.value,
+                    stale=not lookup.fresh,
+                    extra_metadata={"superseded_source": source_value.source},
+                )
+                runtime.memo[key] = cached
+                resolved[key] = ResolutionResult(value=cached)
+                superseded.add(key)
+                self.events.emit(
+                    "source_result_superseded",
+                    resource=str(key),
+                    source=source_value.source,
+                    superseded_by=lookup.value.source,
+                    source_authority_rank=source_value.authority_rank,
+                    cached_authority_rank=lookup.value.authority_rank,
+                )
+        return frozenset(superseded)
 
     def _ensure_open(self) -> None:
         if self._closed:

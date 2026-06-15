@@ -37,7 +37,7 @@ Important attributes:
 - `metrics`
 - `events`
 
-Constructor compatibility is preserved for `retry_policy`, `circuit_breaker`, and `max_concurrency`. `max_concurrency` is builder-wide. `max_pending_tasks` defaults to `max_concurrency` and bounds the worker tasks created for individual and derived source dispatch.
+Constructor compatibility is preserved for `retry_policy`, `circuit_breaker`, and `max_concurrency`. `max_concurrency` is builder-wide. `max_pending_tasks` defaults to `max_concurrency` and bounds worker tasks created for individual and derived source dispatch plus single-key custom-cache reads, writes, atomic writes, and invalidations.
 
 ### `SnapshotSession`
 
@@ -114,7 +114,7 @@ Each accepts synchronous or asynchronous callables. Synchronous functions run in
 
 ## Capacity
 
-Individual and derived sources use a fixed worker pool instead of creating one task per requested key. `max_pending_tasks` controls the maximum workers created by each source dispatch. Results retain the original key order, and cancellation stops all workers before the operation exits. Batch chunk dispatch remains bounded by global capacity, source capacity, and the same pending-task limit.
+Individual and derived sources use a fixed worker pool instead of creating one task per requested key. `max_pending_tasks` controls the maximum workers created by each source dispatch and by single-key custom-cache fallback operations. Results retain the original key order, and cancellation stops all workers before the operation exits. Batch source chunks and native batch cache methods remain on their dedicated bulk paths.
 
 ### `CapacityLimiter`
 
@@ -140,6 +140,8 @@ The special key `"__global__"` identifies global capacity in snapshots.
 - `publish_many(updates, *, force=False, replace_equal=False)`
 - `invalidate(key, *, reason="")`
 - `invalidate_many(keys, *, reason="")`
+
+`ResourcePublisher(..., max_pending_tasks=8)` bounds fallback workers for custom caches without batch methods. Publishers created by `SnapshotBuilder` inherit the builder's `max_pending_tasks` value. Native batch cache operations are not split into workers.
 
 ### `SyncResourcePublisher`
 

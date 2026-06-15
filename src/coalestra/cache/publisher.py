@@ -8,11 +8,13 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
+from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.authority import AuthorityPolicyResolver
 from coalestra.core.errors import SourceProtocolError
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
+    CacheLookup,
     CacheWriteResult,
     CacheWriteStatus,
     FreshnessPolicy,
@@ -31,6 +33,8 @@ from coalestra.core.protocols import (
 from coalestra.core.quality import ObservationPolicy, require_finite_timestamp
 
 T = TypeVar("T")
+
+_DEFAULT_MAX_PENDING_TASKS = 8
 
 
 class PublishStatus(str, Enum):
@@ -97,9 +101,12 @@ class ResourcePublisher:
         payload_copier: PayloadCopier | None = None,
         payload_isolator: PayloadIsolator | None = None,
         authority_resolver: AuthorityPolicyResolver | None = None,
+        max_pending_tasks: int = _DEFAULT_MAX_PENDING_TASKS,
     ) -> None:
         if lock_stripes < 1:
             raise ValueError("lock_stripes must be at least 1")
+        if max_pending_tasks < 1:
+            raise ValueError("max_pending_tasks must be at least 1")
         self.cache = cache
         self.clock = clock
         self.policy_resolver = policy_resolver
@@ -108,6 +115,7 @@ class ResourcePublisher:
         self.observation_policy = observation_policy or ObservationPolicy()
         self._payload_isolator = payload_isolator or PayloadIsolator(payload_copier)
         self.authority_resolver = authority_resolver or AuthorityPolicyResolver()
+        self.max_pending_tasks = int(max_pending_tasks)
         if self.authority_resolver.has_rules and not bool(
             getattr(cache, "validates_source_authority", False)
         ):
@@ -300,7 +308,15 @@ class ResourcePublisher:
             if isinstance(self.cache, BatchAsyncCache):
                 await self.cache.invalidate_many(unique)
             else:
-                await asyncio.gather(*(self.cache.invalidate(key) for key in unique))
+
+                async def invalidate_one(key: ResourceKey) -> None:
+                    await self.cache.invalidate(key)
+
+                await run_bounded(
+                    unique,
+                    invalidate_one,
+                    max_tasks=self.max_pending_tasks,
+                )
         for key in unique:
             self.metrics.increment("resource_invalidation_total", resource=str(key))
             self.events.emit("resource_invalidated", resource=str(key), reason=reason)
@@ -315,8 +331,18 @@ class ResourcePublisher:
         if isinstance(self.cache, BatchAsyncCache):
             lookups = await self.cache.get_many(keys, now=now, policies=policies)
         else:
-            completed = await asyncio.gather(
-                *(self.cache.get(key, now=now, policy=self._all_values_policy) for key in keys)
+
+            async def read_one(key: ResourceKey) -> CacheLookup:
+                return await self.cache.get(
+                    key,
+                    now=now,
+                    policy=self._all_values_policy,
+                )
+
+            completed = await run_bounded(
+                keys,
+                read_one,
+                max_tasks=self.max_pending_tasks,
             )
             lookups = dict(zip(keys, completed, strict=True))
         existing: dict[ResourceKey, SnapshotValue[Any] | None] = {}
@@ -355,15 +381,19 @@ class ResourcePublisher:
                 replace_equal=replace_equal,
             )
         if isinstance(self.cache, AtomicAsyncCache):
-            completed = await asyncio.gather(
-                *(
-                    self.cache.set_if_newer(
-                        value,
-                        force=force,
-                        replace_equal=replace_equal,
-                    )
-                    for value in isolated
+            atomic_cache = self.cache
+
+            async def write_one(value: SnapshotValue[Any]) -> CacheWriteResult:
+                return await atomic_cache.set_if_newer(
+                    value,
+                    force=force,
+                    replace_equal=replace_equal,
                 )
+
+            completed = await run_bounded(
+                isolated,
+                write_one,
+                max_tasks=self.max_pending_tasks,
             )
             return MappingProxyType({result.value.key: result for result in completed})
         return None
@@ -381,7 +411,15 @@ class ResourcePublisher:
         if isinstance(self.cache, BatchAsyncCache):
             await self.cache.set_many(isolated)
         else:
-            await asyncio.gather(*(self.cache.set(value) for value in isolated))
+
+            async def write_one(value: SnapshotValue[Any]) -> None:
+                await self.cache.set(value)
+
+            await run_bounded(
+                isolated,
+                write_one,
+                max_tasks=self.max_pending_tasks,
+            )
 
     def _publish_result_from_cache(self, result: CacheWriteResult) -> PublishResult:
         statuses = {

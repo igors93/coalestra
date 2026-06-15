@@ -1,27 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Collection, Mapping
 from dataclasses import replace
-from types import MappingProxyType
 from typing import Any
 
+from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.isolation import PayloadIsolator
-from coalestra.core.models import (
-    CacheLookup,
-    CacheWriteResult,
-    FreshnessPolicy,
-    ResourceKey,
-    SnapshotValue,
-)
-from coalestra.core.protocols import (
-    AsyncCache,
-    AtomicAsyncCache,
-    BatchAsyncCache,
-    BatchAtomicAsyncCache,
-    Clock,
-)
+from coalestra.core.models import CacheLookup, FreshnessPolicy, ResourceKey, SnapshotValue
+from coalestra.core.protocols import AsyncCache, BatchAsyncCache, Clock
 
 
 class CacheAccess:
@@ -33,10 +20,14 @@ class CacheAccess:
         cache: AsyncCache,
         clock: Clock,
         payload_isolator: PayloadIsolator,
+        max_pending_tasks: int,
     ) -> None:
         self.cache = cache
         self.clock = clock
+        if max_pending_tasks < 1:
+            raise ValueError("max_pending_tasks must be at least 1")
         self.payload_isolator = payload_isolator
+        self.max_pending_tasks = int(max_pending_tasks)
         self._all_values_policy = FreshnessPolicy(
             ttl_seconds=float("inf"),
             max_stale_seconds=float("inf"),
@@ -57,8 +48,14 @@ class CacheAccess:
             diagnostics.cache_batch_reads += 1
             lookups = await self.cache.get_many(unique, now=now, policies=policies)
         else:
-            completed = await asyncio.gather(
-                *(self.cache.get(key, now=now, policy=policies[key]) for key in unique)
+
+            async def read_one(key: ResourceKey) -> CacheLookup:
+                return await self.cache.get(key, now=now, policy=policies[key])
+
+            completed = await run_bounded(
+                unique,
+                read_one,
+                max_tasks=self.max_pending_tasks,
             )
             lookups = dict(zip(unique, completed, strict=True))
 
@@ -72,10 +69,10 @@ class CacheAccess:
         values: Collection[SnapshotValue[Any]],
         *,
         diagnostics: DiagnosticsCollector,
-    ) -> Mapping[ResourceKey, CacheWriteResult] | None:
+    ) -> None:
         unique = tuple({value.key: value for value in values}.values())
         if not unique:
-            return MappingProxyType({})
+            return
         isolated = tuple(
             self.payload_isolator.clone_snapshot_value(
                 value,
@@ -83,20 +80,19 @@ class CacheAccess:
             )
             for value in unique
         )
-        if isinstance(self.cache, BatchAtomicAsyncCache):
-            diagnostics.cache_batch_writes += 1
-            return await self.cache.set_many_if_newer(isolated)
-        if isinstance(self.cache, AtomicAsyncCache):
-            completed = await asyncio.gather(
-                *(self.cache.set_if_newer(value) for value in isolated)
-            )
-            return MappingProxyType({result.value.key: result for result in completed})
         if isinstance(self.cache, BatchAsyncCache):
             diagnostics.cache_batch_writes += 1
             await self.cache.set_many(isolated)
-            return None
-        await asyncio.gather(*(self.cache.set(value) for value in isolated))
-        return None
+            return
+
+        async def write_one(value: SnapshotValue[Any]) -> None:
+            await self.cache.set(value)
+
+        await run_bounded(
+            isolated,
+            write_one,
+            max_tasks=self.max_pending_tasks,
+        )
 
     def cached_copy(
         self,
@@ -208,7 +204,15 @@ class CacheAccess:
         if isinstance(self.cache, BatchAsyncCache):
             await self.cache.invalidate_many(unique)
             return
-        await asyncio.gather(*(self.cache.invalidate(key) for key in unique))
+
+        async def invalidate_one(key: ResourceKey) -> None:
+            await self.cache.invalidate(key)
+
+        await run_bounded(
+            unique,
+            invalidate_one,
+            max_tasks=self.max_pending_tasks,
+        )
 
     def _isolated_lookup(
         self,

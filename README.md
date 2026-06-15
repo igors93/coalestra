@@ -330,7 +330,7 @@ Every `SnapshotValue` carries an opaque resource version. Derived values record 
 
 ## Global and per-source capacity
 
-`max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity. `max_pending_tasks` bounds the fixed worker pool used to dispatch individual and derived resources, preventing one large request from creating one asyncio task per key. It defaults to `max_concurrency`.
+`max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity. `max_pending_tasks` bounds the fixed worker pools used for individual and derived source dispatch and for single-key custom-cache fallbacks. This prevents one large request or publication from creating one asyncio task per key. It defaults to `max_concurrency`.
 
 ```python
 builder = SnapshotBuilder(
@@ -356,7 +356,7 @@ rest_source = CallableSource(
 )
 ```
 
-An explicit `source_concurrency` entry overrides the limit declared by the source. Batch calls consume one slot regardless of batch size. Derivation consumes a slot only while the derivation function itself runs; dependency acquisition uses its own source slots. Individual and derived dispatch preserve input ordering while using at most `max_pending_tasks` workers per source attempt. Values above `max_concurrency` permit a bounded number of workers to wait during retries or capacity contention; lower values deliberately reduce dispatch parallelism.
+An explicit `source_concurrency` entry overrides the limit declared by the source. Batch calls consume one slot regardless of batch size. Derivation consumes a slot only while the derivation function itself runs; dependency acquisition uses its own source slots. Individual and derived dispatch preserve input ordering while using at most `max_pending_tasks` workers per source attempt. Custom caches implementing `BatchAsyncCache` keep their native bulk path; single-key custom caches use the same worker limit for reads, writes, atomic writes, and invalidations. Values above `max_concurrency` permit a bounded number of workers to wait during retries or capacity contention; lower values deliberately reduce dispatch and cache-fallback parallelism.
 
 ## Source-specific resilience and circuit scopes
 
@@ -400,6 +400,8 @@ Policies can also be supplied centrally through `source_resilience` or a `Resili
 ## Direct event publication
 
 A long-lived builder exposes a `ResourcePublisher` backed by the same cache used by snapshot acquisition.
+Builder-created publishers inherit `max_pending_tasks`. A standalone `ResourcePublisher` accepts the same option, defaulting to 8, to bound fallback operations when its cache does not implement batch methods.
+
 
 ```python
 await builder.publisher.publish(
