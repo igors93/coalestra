@@ -542,13 +542,19 @@ src/coalestra/
 └── sync.py           # Persistent synchronous facades
 ```
 
-## Quality pipeline
+## Quality and release pipeline
 
 ```bash
 make quality
 ```
 
-This runs formatting, linting, strict mypy, verifies the 500-test minimum, executes the full 618-test suite, and builds the package.
+The quality gate checks formatting without modifying files, runs lint and strict mypy, verifies the 700-test minimum, executes deterministic concurrency regressions and the complete suite, validates version consistency, builds both distributions, installs the wheel in a clean virtual environment, and checks the exact public API manifest.
+
+```bash
+make release-check
+```
+
+The release gate uses the same checks locally. GitHub Actions repeats the supported-Python test matrix on Python 3.10-3.13. Distribution artifacts are built only after that matrix succeeds. Tag builds additionally require `vX.Y.Z` to match `pyproject.toml`, `coalestra.__version__`, and the dated changelog section. Verified wheel and source-distribution artifacts are uploaded by the workflow.
 
 ## Documentation
 

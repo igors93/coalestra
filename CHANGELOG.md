@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+## 0.5.6 - 2026-06-15
+
 - Replaced full resource-key metric labels with bounded `resource_namespace` and `resource_name` labels while preserving full resource identity in structured events.
 - Expanded `BuilderHealth` with aggregated dispatch, capacity-wait, timeout, revalidation, and synchronous submission-backlog state.
+- Made wheel and source-distribution builds mandatory after the supported-Python test matrix succeeds.
+- Added clean-wheel installation, exact public-API manifest verification, and project/package/tag version consistency checks.
+- Added deterministic release concurrency regressions for authority races, capacity cancellation, session revalidation, and synchronous shutdown draining.
 
 ## 0.5.5 - 2026-06-15
 

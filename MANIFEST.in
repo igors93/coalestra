@@ -9,3 +9,5 @@ recursive-include benchmarks *.py
 recursive-include tests *.py
 
 recursive-include scripts *.py
+
+include scripts/public_api.txt

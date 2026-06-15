@@ -15,7 +15,7 @@ class CollectionCounter:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--minimum", type=int, default=500)
+    parser.add_argument("--minimum", type=int, default=700)
     args = parser.parse_args()
 
     counter = CollectionCounter()

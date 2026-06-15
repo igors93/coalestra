@@ -111,7 +111,7 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",

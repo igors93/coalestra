@@ -1,0 +1,60 @@
+name: Release validation
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release:
+    name: Validate ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Verify tag and project versions
+        run: python scripts/check_version_consistency.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Check formatting and lint
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
+
+      - name: Type check
+        run: python -m mypy
+
+      - name: Verify test floor
+        run: python scripts/check_test_count.py --minimum 700
+
+      - name: Run deterministic concurrency regressions
+        run: python -m pytest -m release_concurrency --tb=short
+
+      - name: Run full test suite
+        run: python -m pytest --tb=short
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Install wheel in a clean environment and verify public API
+        run: python scripts/verify_distribution.py
+
+      - name: Upload release-ready distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: coalestra-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
