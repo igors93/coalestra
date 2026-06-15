@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.7 - 2026-06-15
+
+- Added opt-in observation-skew limits to `SnapshotRequest` through `SnapshotConsistencyPolicy`.
+- Added `SnapshotConsistencyError` with oldest/newest resource details and compatible partial-snapshot diagnostics.
+- Added transactional observation-skew validation to asynchronous and synchronous session revalidation.
+- Preserved existing behavior for requests and revalidations that do not configure a consistency policy.
+- Corrected build outcome metrics so consistency failures are recorded as failed builds even when every resource resolved successfully.
+
 ## 0.5.6 - 2026-06-15
 
 - Replaced full resource-key metric labels with bounded `resource_namespace` and `resource_name` labels while preserving full resource identity in structured events.

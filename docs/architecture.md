@@ -180,6 +180,10 @@ This permits policies such as reconciled local state above event streams above R
 
 Coalestra provides acquisition consistency, not a distributed transaction. Independent resources may have different `observed_at` timestamps. Consumers can inspect age and provenance and apply stronger domain constraints.
 
+`SnapshotRequest.consistency_policy` can enforce a maximum observation skew across required resources, or across all resolved request resources when optional inclusion is enabled. The check runs only after required-resource resolution succeeds, preserving the existing required/optional failure precedence. A violation raises `SnapshotConsistencyError` with the complete partial snapshot and the oldest/newest observations.
+
+Transactional session revalidation accepts the same policy for its explicitly selected keys. The candidate values are checked before the staging runtime is committed. A violation therefore leaves the previous session memo and visible resources unchanged. This rule remains orthogonal to freshness: a group can be temporally aligned but old, or individually fresh but too far apart from one another.
+
 ## Deadlines and timeouts
 
 A deadline is created once per build or session using a monotonic clock. Source timeout covers waiting for capacity and executing the source call. This ensures queued work cannot outlive the consumer's acquisition deadline.

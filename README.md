@@ -21,6 +21,7 @@ It coalesces duplicate requests, batches compatible resources, derives values fr
 - Direct asynchronous and synchronous event publication into the cache.
 - Monotonic publication that rejects older or duplicate events by default.
 - Consolidated immutable diagnostics on every snapshot.
+- Optional observation-skew limits for temporally coherent request groups and revalidation.
 - Buffered event and metrics sinks that keep downstream I/O outside the acquisition path.
 - Replaceable cache, clock, event, and metrics interfaces.
 - Async API plus persistent synchronous facades.
@@ -54,6 +55,35 @@ snapshot = await builder.build_request(request, deadline_seconds=3.0)
 ```
 
 Only required failures raise `SnapshotBuildError`. The exception exposes a partial `snapshot`, so already resolved values and diagnostics are not lost. Sessions and synchronous facades expose the same request API.
+
+### Temporal consistency
+
+A request can reject a group whose resolved values were observed too far apart in time:
+
+```python
+from coalestra import SnapshotConsistencyPolicy, SnapshotRequest
+
+request = SnapshotRequest(
+    required=[ACCOUNT, POSITION, OPEN_ORDERS],
+    optional=[MARKET_HEALTH],
+    consistency_policy=SnapshotConsistencyPolicy(
+        max_observation_skew_seconds=2.0,
+    ),
+)
+```
+
+The default scope contains required resources only. Set `include_optional_resources=True` when every resolved optional value should participate. A violation raises `SnapshotConsistencyError`, which remains a `SnapshotBuildError`, exposes the complete partial snapshot, and identifies the oldest and newest resources. The feature is opt-in, so existing requests keep their current behavior.
+
+Selective revalidation can enforce the same invariant before committing refreshed values:
+
+```python
+updated = await session.revalidate(
+    [POSITION, OPEN_ORDERS, ACCOUNT],
+    consistency_policy=SnapshotConsistencyPolicy(2.0),
+)
+```
+
+A revalidation consistency failure always retains the previous session state and raises `SnapshotConsistencyError`, including when `strict=False`. Freshness and observation skew remain separate checks: freshness limits how old one value may be, while skew limits how far apart a group of values may be.
 
 ### Versioned error diagnostics
 

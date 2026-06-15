@@ -4,7 +4,16 @@ import asyncio
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
-from coalestra.core.errors import SessionClosedError, SnapshotBuildError
+from coalestra.core.consistency import (
+    ObservationSkewViolation,
+    SnapshotConsistencyPolicy,
+    find_observation_skew_violation,
+)
+from coalestra.core.errors import (
+    SessionClosedError,
+    SnapshotBuildError,
+    SnapshotConsistencyError,
+)
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue
 from coalestra.core.request import SnapshotRequest
 from coalestra.orchestration.runtime import ResolutionRuntime
@@ -128,6 +137,19 @@ class SnapshotSession:
         }
         if required_errors:
             raise SnapshotBuildError(required_errors, snapshot=snapshot)
+
+        policy = request.consistency_policy
+        if policy is not None:
+            consistency_keys = (
+                request.keys if policy.include_optional_resources else request.required
+            )
+            violation = find_observation_skew_violation(
+                snapshot.resources,
+                consistency_keys,
+                policy,
+            )
+            if violation is not None:
+                raise self._consistency_error(violation, snapshot=snapshot)
         return snapshot
 
     async def revalidate(
@@ -136,6 +158,7 @@ class SnapshotSession:
         *,
         strict: bool = True,
         force_refresh: bool = False,
+        consistency_policy: SnapshotConsistencyPolicy | None = None,
     ) -> Snapshot:
         """Refresh selected pinned resources without replacing unrelated session values.
 
@@ -145,9 +168,11 @@ class SnapshotSession:
         when they depend on a selected key. The session update is transactional: either every
         affected visible resource is committed together, or the previous pinned state is retained.
 
-        When ``strict=False`` and revalidation fails, the returned snapshot contains the retained
-        previous values plus transient errors for the failed refresh attempt. Those transient errors
-        are not persisted in the session.
+        When ``strict=False`` and resource resolution fails, the returned snapshot contains the
+        retained previous values plus transient errors for the failed refresh attempt. Those
+        transient errors are not persisted in the session. A declared consistency policy is an
+        invariant: an observation-skew violation always raises ``SnapshotConsistencyError`` and
+        leaves the previous session state unchanged.
         """
 
         async with self._lock:
@@ -196,6 +221,28 @@ class SnapshotSession:
                 if strict:
                     raise SnapshotBuildError(errors, snapshot=snapshot)
                 return snapshot
+
+            if consistency_policy is not None:
+                violation = find_observation_skew_violation(
+                    values,
+                    requested,
+                    consistency_policy,
+                )
+                if violation is not None:
+                    self._record_revalidation(
+                        requested=requested,
+                        affected=affected,
+                        errors={},
+                        committed=False,
+                        refreshed=0,
+                        strict=strict,
+                        force_refresh=force_refresh,
+                        consistency_failed=True,
+                    )
+                    raise self._consistency_error(
+                        violation,
+                        snapshot=self.snapshot(),
+                    )
 
             self._runtime.memo.clear()
             self._runtime.memo.update(staging_runtime.memo)
@@ -288,6 +335,7 @@ class SnapshotSession:
         refreshed: int,
         strict: bool,
         force_refresh: bool,
+        consistency_failed: bool = False,
     ) -> None:
         status = "success" if committed else "error"
         self._builder._health_tracker.record_revalidation(failed=not committed)
@@ -306,7 +354,40 @@ class SnapshotSession:
             retained_previous=not committed,
             strict=strict,
             force_refresh=force_refresh,
+            consistency_failed=consistency_failed,
         )
+
+    def _consistency_error(
+        self,
+        violation: ObservationSkewViolation,
+        *,
+        snapshot: Snapshot,
+    ) -> SnapshotConsistencyError:
+        error = SnapshotConsistencyError(
+            keys=violation.keys,
+            oldest_key=violation.oldest_key,
+            oldest_observed_at=violation.oldest_observed_at,
+            newest_key=violation.newest_key,
+            newest_observed_at=violation.newest_observed_at,
+            observation_skew_seconds=violation.observation_skew_seconds,
+            max_observation_skew_seconds=violation.max_observation_skew_seconds,
+            snapshot=snapshot,
+        )
+        self._builder.metrics.increment(
+            "snapshot_consistency_total",
+            status="error",
+            rule="observation_skew",
+        )
+        self._builder.events.emit(
+            "snapshot_consistency_failed",
+            snapshot_id=self.snapshot_id,
+            resources=len(violation.keys),
+            oldest_resource=str(violation.oldest_key),
+            newest_resource=str(violation.newest_key),
+            observation_skew_ms=violation.observation_skew_seconds * 1000.0,
+            max_observation_skew_ms=violation.max_observation_skew_seconds * 1000.0,
+        )
+        return error
 
     @staticmethod
     def _normalize_keys(keys: Iterable[ResourceKey]) -> tuple[ResourceKey, ...]:

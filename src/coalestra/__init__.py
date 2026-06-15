@@ -62,6 +62,8 @@ from coalestra.core import (
     SessionClosedError,
     Snapshot,
     SnapshotBuildError,
+    SnapshotConsistencyError,
+    SnapshotConsistencyPolicy,
     SnapshotDeadlineExceededError,
     SnapshotDiagnostics,
     SnapshotRequest,
@@ -111,7 +113,7 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
@@ -189,6 +191,8 @@ __all__ = [
     "Snapshot",
     "SnapshotBuildError",
     "SnapshotBuilder",
+    "SnapshotConsistencyError",
+    "SnapshotConsistencyPolicy",
     "SnapshotDeadlineExceededError",
     "SnapshotDiagnostics",
     "SnapshotRequest",

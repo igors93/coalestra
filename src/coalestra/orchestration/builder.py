@@ -303,7 +303,11 @@ class SnapshotBuilder:
             try:
                 await session.resolve(keys, strict=strict)
             except SnapshotBuildError:
-                self._record_snapshot_built(session.snapshot(), strict=strict)
+                self._record_snapshot_built(
+                    session.snapshot(),
+                    strict=strict,
+                    failed=True,
+                )
                 raise
             snapshot = session.snapshot()
             self._record_snapshot_built(snapshot, strict=strict)
@@ -329,11 +333,11 @@ class SnapshotBuilder:
         )
         try:
             snapshot = await session.resolve_request(request)
-            self._record_snapshot_built(snapshot, strict=True)
+            self._record_snapshot_built(snapshot, strict=True, failed=False)
             return snapshot
         except SnapshotBuildError as error:
             snapshot = session.snapshot()
-            self._record_snapshot_built(snapshot, strict=True)
+            self._record_snapshot_built(snapshot, strict=True, failed=True)
             if error.snapshot is None:
                 error.snapshot = snapshot
             raise
@@ -768,10 +772,17 @@ class SnapshotBuilder:
         if self._closed:
             raise RuntimeError("SnapshotBuilder is closed")
 
-    def _record_snapshot_built(self, snapshot: Snapshot, *, strict: bool) -> None:
+    def _record_snapshot_built(
+        self,
+        snapshot: Snapshot,
+        *,
+        strict: bool,
+        failed: bool | None = None,
+    ) -> None:
+        build_failed = bool(snapshot.errors) if failed is None else bool(failed)
         self.metrics.increment(
             "snapshot_build_total",
-            status="error" if snapshot.errors else "success",
+            status="error" if build_failed else "success",
         )
         self.events.emit(
             "snapshot_built",
@@ -779,6 +790,7 @@ class SnapshotBuilder:
             resources=len(snapshot.resources) + len(snapshot.errors),
             resolved=len(snapshot.resources),
             failed=len(snapshot.errors),
+            build_failed=build_failed,
             strict=strict,
             diagnostics=snapshot.diagnostics,
         )

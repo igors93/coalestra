@@ -315,3 +315,37 @@ class SnapshotBuildError(CoalestraError):
             "has_partial_snapshot": partial_snapshot_available,
             "errors": details,
         }
+
+
+class SnapshotConsistencyError(SnapshotBuildError):
+    """Raised when resolved resources violate a declared consistency policy."""
+
+    def __init__(
+        self,
+        *,
+        keys: tuple[ResourceKey, ...],
+        oldest_key: ResourceKey,
+        oldest_observed_at: float,
+        newest_key: ResourceKey,
+        newest_observed_at: float,
+        observation_skew_seconds: float,
+        max_observation_skew_seconds: float,
+        snapshot: Any | None = None,
+    ) -> None:
+        self.errors: dict[ResourceKey, Exception] = {}
+        self.snapshot = snapshot
+        self.keys = keys
+        self.oldest_key = oldest_key
+        self.oldest_observed_at = float(oldest_observed_at)
+        self.newest_key = newest_key
+        self.newest_observed_at = float(newest_observed_at)
+        self.observation_skew_seconds = float(observation_skew_seconds)
+        self.max_observation_skew_seconds = float(max_observation_skew_seconds)
+        CoalestraError.__init__(
+            self,
+            "Snapshot observation skew "
+            f"{self.observation_skew_seconds:.6f}s exceeds the allowed "
+            f"{self.max_observation_skew_seconds:.6f}s across {len(self.keys)} resource(s); "
+            f"oldest={self.oldest_key}@{self.oldest_observed_at:.6f}, "
+            f"newest={self.newest_key}@{self.newest_observed_at:.6f}",
+        )

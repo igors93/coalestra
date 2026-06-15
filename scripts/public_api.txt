@@ -73,6 +73,8 @@ SessionClosedError
 Snapshot
 SnapshotBuildError
 SnapshotBuilder
+SnapshotConsistencyError
+SnapshotConsistencyPolicy
 SnapshotDeadlineExceededError
 SnapshotDiagnostics
 SnapshotRequest

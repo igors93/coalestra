@@ -4,6 +4,7 @@ from coalestra.core.authority import (
     SourceAuthorityPolicy,
 )
 from coalestra.core.clock import SystemClock
+from coalestra.core.consistency import SnapshotConsistencyPolicy
 from coalestra.core.diagnostic_schema import (
     ERROR_DIAGNOSTICS_SCHEMA,
     ERROR_DIAGNOSTICS_SCHEMA_VERSION,
@@ -21,6 +22,7 @@ from coalestra.core.errors import (
     ResourceResolutionError,
     SessionClosedError,
     SnapshotBuildError,
+    SnapshotConsistencyError,
     SnapshotDeadlineExceededError,
     SourceFailure,
     SourceProtocolError,
@@ -120,6 +122,8 @@ __all__ = [
     "SessionClosedError",
     "Snapshot",
     "SnapshotBuildError",
+    "SnapshotConsistencyError",
+    "SnapshotConsistencyPolicy",
     "SnapshotDeadlineExceededError",
     "SnapshotDiagnostics",
     "SnapshotRequest",

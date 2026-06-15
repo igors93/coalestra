@@ -267,6 +267,7 @@ Additional event types include:
 - `PayloadIsolationError`
 - `ResourceResolutionError`
 - `SnapshotBuildError`
+- `SnapshotConsistencyError`
 - `SessionClosedError`
 - `SubmissionBacklogFullError`
 
@@ -401,7 +402,24 @@ Implements `MetricsSink` and exposes the same lifecycle methods.
 
 ### `SnapshotRequest`
 
-Declares required and optional keys. Use with `SnapshotBuilder.build_request`, `SnapshotSession.resolve_request`, `SyncSnapshotBuilder.build_request`, or `SyncSnapshotSession.resolve_request`.
+Declares required and optional keys. Use with `SnapshotBuilder.build_request`, `SnapshotSession.resolve_request`, `SyncSnapshotBuilder.build_request`, or `SyncSnapshotSession.resolve_request`. The optional `consistency_policy` applies an observation-skew limit after required-resource resolution succeeds. Required resources participate by default; `SnapshotConsistencyPolicy.include_optional_resources` can include resolved optional resources.
+
+### `SnapshotConsistencyPolicy`
+
+```python
+SnapshotConsistencyPolicy(
+    max_observation_skew_seconds,
+    include_optional_resources=False,
+)
+```
+
+The limit must be finite and non-negative. Values exactly at the configured boundary are accepted. Requests with fewer than two participating resolved resources have no possible skew and pass the check.
+
+### `SnapshotConsistencyError`
+
+A subclass of `SnapshotBuildError` raised when participating values exceed the configured observation-skew limit. It preserves the partial snapshot and exposes `keys`, `oldest_key`, `oldest_observed_at`, `newest_key`, `newest_observed_at`, `observation_skew_seconds`, and `max_observation_skew_seconds`. The inherited `to_dict()` method remains compatible with error-diagnostics schema version 1.
+
+`SnapshotSession.revalidate` and `SyncSnapshotSession.revalidate` accept an optional `consistency_policy`. The policy applies to the explicitly revalidated keys. A violation is always raised as `SnapshotConsistencyError` and the previous session state remains committed.
 
 ### Payload isolation
 
