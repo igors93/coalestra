@@ -120,19 +120,32 @@ class SourceCatalog:
             raise ValueError("source name cannot be empty")
         if not callable(getattr(source, "supports", None)):
             raise TypeError(f"source {source.name} must define supports()")
+
+        timeout_seconds = getattr(source, "timeout_seconds", None)
+        if timeout_seconds is not None and float(timeout_seconds) <= 0:
+            raise ValueError(f"source {source.name} timeout_seconds must be positive")
+
+        queue_timeout_seconds = getattr(source, "queue_timeout_seconds", None)
+        if queue_timeout_seconds is not None and float(queue_timeout_seconds) <= 0:
+            raise ValueError(f"source {source.name} queue_timeout_seconds must be positive")
+
         max_concurrency = getattr(source, "max_concurrency", None)
         if max_concurrency is not None and int(max_concurrency) < 1:
             raise ValueError(f"source {source.name} max_concurrency must be at least 1")
+
         max_batch_size = getattr(source, "max_batch_size", None)
         if max_batch_size is not None and int(max_batch_size) < 1:
             raise ValueError(f"source {source.name} max_batch_size must be at least 1")
+
         declared_resilience = getattr(source, "resilience_policy", None)
         if declared_resilience is not None and not isinstance(
-            declared_resilience, SourceResiliencePolicy
+            declared_resilience,
+            SourceResiliencePolicy,
         ):
             raise TypeError(
                 f"source {source.name} resilience_policy must be SourceResiliencePolicy or None"
             )
+
         kind = cls._source_kind(source)
         if kind == "single" and not callable(getattr(source, "fetch", None)):
             raise TypeError(

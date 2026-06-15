@@ -42,6 +42,14 @@ class SourceTimeoutError(SourceUnavailableError):
     """Raised when a source exceeds its configured timeout."""
 
 
+class SourceQueueTimeoutError(SourceTimeoutError):
+    """Raised when a source cannot acquire Coalestra capacity in time."""
+
+
+class SnapshotDeadlineExceededError(SourceTimeoutError):
+    """Raised when the overall snapshot deadline is exhausted."""
+
+
 class SourceProtocolError(CoalestraError):
     """Raised when a source violates one of Coalestra's source contracts."""
 

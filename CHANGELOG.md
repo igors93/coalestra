@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2 - 2026-06-14
+
+- Added atomic and monotonic cache writes.
+- Rejected non-finite observation timestamps.
+- Split SnapshotBuilder into focused internal components.
+- Expanded regression and component-level test coverage.
+
 ## 0.5.1 - 2026-06-14
 
 - Added bounded nested source-failure details to `SnapshotBuildError`.

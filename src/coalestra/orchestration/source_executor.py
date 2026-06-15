@@ -9,7 +9,9 @@ from coalestra.core.errors import (
     CircuitOpenError,
     DependencyCycleError,
     DependencyResolutionError,
+    SnapshotDeadlineExceededError,
     SourceProtocolError,
+    SourceQueueTimeoutError,
     SourceUnavailableError,
 )
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue
@@ -68,6 +70,7 @@ class SourceExecutor:
                 ancestry=ancestry,
                 local_owned=local_owned,
             )
+
         if kind == "batch":
             batch_source = cast(BatchSnapshotSource, source)
             requested = tuple(dict.fromkeys(keys))
@@ -80,13 +83,20 @@ class SourceExecutor:
                     context=context,
                     runtime=runtime,
                 )
+
             chunks = tuple(
                 requested[index : index + int(max_batch_size)]
                 for index in range(0, len(requested), int(max_batch_size))
             )
             runtime.diagnostics.batch_chunks += len(chunks)
             source_limit = self.calls.capacity.limit_for(batch_source.name)
-            wave_size = max(1, min(self.max_concurrency, source_limit or self.max_concurrency))
+            wave_size = max(
+                1,
+                min(
+                    self.max_concurrency,
+                    source_limit or self.max_concurrency,
+                ),
+            )
             merged: dict[ResourceKey, SourceAttempt] = {}
             for start in range(0, len(chunks), wave_size):
                 wave = chunks[start : start + wave_size]
@@ -104,6 +114,7 @@ class SourceExecutor:
                 for result in completed:
                     merged.update(result)
             return merged
+
         return await self._attempt_single_source(
             cast(SnapshotSource, source),
             keys,
@@ -130,7 +141,13 @@ class SourceExecutor:
                     policy=resilience.circuit,
                 )
                 payload, attempts = await run_with_retry(
-                    partial(self.calls.fetch_once, source, key, context, runtime),
+                    partial(
+                        self.calls.fetch_once,
+                        source,
+                        key,
+                        context,
+                        runtime,
+                    ),
                     policy=resilience.retry,
                     retryable=self.calls.is_retryable,
                     deadline_monotonic=context.deadline_monotonic,
@@ -155,6 +172,24 @@ class SourceExecutor:
                     policy=resilience.circuit,
                 )
                 raise
+            except (
+                SnapshotDeadlineExceededError,
+                SourceQueueTimeoutError,
+            ) as error:
+                await self.calls.circuit_breaker.record_skipped(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
+                attempts = self.calls.attempt_count(
+                    error,
+                    resilience.retry,
+                )
+                return key, SourceAttempt(
+                    error=error,
+                    attempts=attempts,
+                    latency_ms=self.calls.elapsed_ms(started),
+                )
             except CircuitOpenError as error:
                 self.calls.record_circuit_open(source, key, error)
                 return key, SourceAttempt(
@@ -170,7 +205,11 @@ class SourceExecutor:
                 )
                 if isinstance(error, SourceProtocolError) and "in the future" in str(error):
                     runtime.diagnostics.future_timestamp_rejections += 1
-                attempts = self.calls.attempt_count(error, resilience.retry)
+
+                attempts = self.calls.attempt_count(
+                    error,
+                    resilience.retry,
+                )
                 runtime.diagnostics.retries += max(0, attempts - 1)
                 return key, SourceAttempt(
                     error=error,
@@ -180,7 +219,10 @@ class SourceExecutor:
 
         completed = await asyncio.gather(*(fetch_one(key) for key in keys))
         for _key, attempt in completed:
-            runtime.diagnostics.record_source_latency(source.name, attempt.latency_ms)
+            runtime.diagnostics.record_source_latency(
+                source.name,
+                attempt.latency_ms,
+            )
         return dict(completed)
 
     async def _attempt_batch_source(
@@ -196,9 +238,14 @@ class SourceExecutor:
         started = self.calls.clock.monotonic()
         results: dict[ResourceKey, SourceAttempt] = {}
 
-        groups = self.source_catalog.circuit_groups(source, requested, resilience)
+        groups = self.source_catalog.circuit_groups(
+            source,
+            requested,
+            resilience,
+        )
         active_groups: list[tuple[ResourceKey, tuple[ResourceKey, ...]]] = []
         allowed: set[ResourceKey] = set()
+
         for representative, grouped_keys in groups:
             try:
                 await self.calls.circuit_breaker.before_call(
@@ -209,7 +256,11 @@ class SourceExecutor:
                 active_groups.append((representative, grouped_keys))
                 allowed.update(grouped_keys)
             except CircuitOpenError as error:
-                self.calls.record_circuit_open(source, representative, error)
+                self.calls.record_circuit_open(
+                    source,
+                    representative,
+                    error,
+                )
                 for key in grouped_keys:
                     results[key] = SourceAttempt(
                         error=error,
@@ -223,7 +274,13 @@ class SourceExecutor:
 
         try:
             payloads, attempts = await run_with_retry(
-                partial(self.calls.fetch_many_once, source, active_keys, context, runtime),
+                partial(
+                    self.calls.fetch_many_once,
+                    source,
+                    active_keys,
+                    context,
+                    runtime,
+                ),
                 policy=resilience.retry,
                 retryable=self.calls.is_retryable,
                 deadline_monotonic=context.deadline_monotonic,
@@ -231,18 +288,33 @@ class SourceExecutor:
             )
             runtime.diagnostics.retries += max(0, attempts - 1)
             latency_ms = self.calls.elapsed_ms(started)
-            runtime.diagnostics.record_source_latency(source.name, latency_ms)
-            invalid_payloads: dict[ResourceKey, SourceProtocolError] = {}
+            runtime.diagnostics.record_source_latency(
+                source.name,
+                latency_ms,
+            )
+
+            invalid_payloads: dict[
+                ResourceKey,
+                SourceProtocolError,
+            ] = {}
             for key, payload in payloads.items():
                 try:
-                    self.calls.validate_payload_timestamp(key, payload)
+                    self.calls.validate_payload_timestamp(
+                        key,
+                        payload,
+                    )
                 except SourceProtocolError as error:
                     invalid_payloads[key] = error
                     runtime.diagnostics.future_timestamp_rejections += 1
+
             returned = set(payloads).difference(invalid_payloads)
             for representative, grouped_keys in active_groups:
                 has_fresh_value = any(
-                    key in returned and self.calls.payload_is_fresh(key, payloads[key])
+                    key in returned
+                    and self.calls.payload_is_fresh(
+                        key,
+                        payloads[key],
+                    )
                     for key in grouped_keys
                 )
                 if has_fresh_value:
@@ -268,6 +340,7 @@ class SourceExecutor:
                 float(len(active_keys)),
                 source=source.name,
             )
+
             for key in active_keys:
                 if key in invalid_payloads:
                     results[key] = SourceAttempt(
@@ -298,6 +371,48 @@ class SourceExecutor:
                     policy=resilience.circuit,
                 )
             raise
+        except (
+            SnapshotDeadlineExceededError,
+            SourceQueueTimeoutError,
+        ) as error:
+            for representative, _grouped_keys in active_groups:
+                await self.calls.circuit_breaker.record_skipped(
+                    source.name,
+                    key=representative,
+                    policy=resilience.circuit,
+                )
+
+            latency_ms = self.calls.elapsed_ms(started)
+            runtime.diagnostics.record_source_latency(
+                source.name,
+                latency_ms,
+            )
+            attempts = self.calls.attempt_count(
+                error,
+                resilience.retry,
+            )
+            runtime.diagnostics.retries += max(0, attempts - 1)
+            status = (
+                "deadline_exceeded"
+                if isinstance(
+                    error,
+                    SnapshotDeadlineExceededError,
+                )
+                else "queue_timeout"
+            )
+            self.calls.metrics.increment(
+                "source_batch_call_total",
+                status=status,
+                source=source.name,
+            )
+
+            for key in active_keys:
+                results[key] = SourceAttempt(
+                    error=error,
+                    attempts=attempts,
+                    latency_ms=latency_ms,
+                )
+            return results
         except Exception as error:
             for representative, _grouped_keys in active_groups:
                 await self.calls.circuit_breaker.record_failure(
@@ -305,15 +420,23 @@ class SourceExecutor:
                     key=representative,
                     policy=resilience.circuit,
                 )
+
             latency_ms = self.calls.elapsed_ms(started)
-            runtime.diagnostics.record_source_latency(source.name, latency_ms)
+            runtime.diagnostics.record_source_latency(
+                source.name,
+                latency_ms,
+            )
             self.calls.metrics.increment(
                 "source_batch_call_total",
                 status="failure",
                 source=source.name,
             )
-            attempts = self.calls.attempt_count(error, resilience.retry)
+            attempts = self.calls.attempt_count(
+                error,
+                resilience.retry,
+            )
             runtime.diagnostics.retries += max(0, attempts - 1)
+
             for key in active_keys:
                 results[key] = SourceAttempt(
                     error=error,
@@ -334,7 +457,9 @@ class SourceExecutor:
     ) -> dict[ResourceKey, SourceAttempt]:
         resilience = self.source_catalog.resilience_for(source)
 
-        async def derive_one(key: ResourceKey) -> tuple[ResourceKey, SourceAttempt]:
+        async def derive_one(
+            key: ResourceKey,
+        ) -> tuple[ResourceKey, SourceAttempt]:
             started = self.calls.clock.monotonic()
             path = (*ancestry, key)
             try:
@@ -387,7 +512,10 @@ class SourceExecutor:
                     deadline_monotonic=context.deadline_monotonic,
                     monotonic=self.calls.clock.monotonic,
                 )
-                runtime.diagnostics.retries += max(0, attempts - 1)
+                runtime.diagnostics.retries += max(
+                    0,
+                    attempts - 1,
+                )
                 await self.calls.record_payload_circuit_outcome(
                     source,
                     key,
@@ -406,14 +534,39 @@ class SourceExecutor:
                     policy=resilience.circuit,
                 )
                 raise
+            except (
+                SnapshotDeadlineExceededError,
+                SourceQueueTimeoutError,
+            ) as error:
+                await self.calls.circuit_breaker.record_skipped(
+                    source.name,
+                    key=key,
+                    policy=resilience.circuit,
+                )
+                attempts = self.calls.attempt_count(
+                    error,
+                    resilience.retry,
+                )
+                return key, SourceAttempt(
+                    error=error,
+                    attempts=attempts,
+                    latency_ms=self.calls.elapsed_ms(started),
+                )
             except CircuitOpenError as error:
-                self.calls.record_circuit_open(source, key, error)
+                self.calls.record_circuit_open(
+                    source,
+                    key,
+                    error,
+                )
                 return key, SourceAttempt(
                     error=error,
                     attempts=0,
                     latency_ms=self.calls.elapsed_ms(started),
                 )
-            except (DependencyCycleError, DependencyResolutionError) as error:
+            except (
+                DependencyCycleError,
+                DependencyResolutionError,
+            ) as error:
                 return key, SourceAttempt(
                     error=error,
                     attempts=0,
@@ -439,8 +592,14 @@ class SourceExecutor:
                     key=key,
                     policy=resilience.circuit,
                 )
-                attempts = self.calls.attempt_count(error, resilience.retry)
-                runtime.diagnostics.retries += max(0, attempts - 1)
+                attempts = self.calls.attempt_count(
+                    error,
+                    resilience.retry,
+                )
+                runtime.diagnostics.retries += max(
+                    0,
+                    attempts - 1,
+                )
                 return key, SourceAttempt(
                     error=error,
                     attempts=attempts,
@@ -449,5 +608,8 @@ class SourceExecutor:
 
         completed = await asyncio.gather(*(derive_one(key) for key in keys))
         for _key, attempt in completed:
-            runtime.diagnostics.record_source_latency(source.name, attempt.latency_ms)
+            runtime.diagnostics.record_source_latency(
+                source.name,
+                attempt.latency_ms,
+            )
         return dict(completed)

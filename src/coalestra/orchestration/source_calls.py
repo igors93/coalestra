@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from coalestra.concurrency.capacity import CapacityController
+from coalestra.concurrency.capacity import CapacityController, CapacityLease
 from coalestra.core.errors import (
     CircuitOpenError,
+    SnapshotDeadlineExceededError,
     SourceFailure,
     SourceProtocolError,
+    SourceQueueTimeoutError,
     SourceTimeoutError,
     SourceUnavailableError,
 )
@@ -30,6 +33,16 @@ from coalestra.resilience.policy import SourceResiliencePolicy
 from coalestra.resilience.retry import RetryPolicy, attempts_for
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class _TimeoutBudget:
+    seconds: float | None
+    limited_by_deadline: bool = False
+
+
+class _OperationTimedOut(Exception):
+    """Internal marker raised only when a Coalestra-owned timer expires."""
 
 
 class SourceCalls:
@@ -61,18 +74,22 @@ class SourceCalls:
         context: FetchContext,
         runtime: ResolutionRuntime,
     ) -> SourcePayload[Any]:
-        async def invoke() -> SourcePayload[Any]:
-            wait_started = self.clock.monotonic()
-            async with self.capacity.slot(source.name):
-                runtime.diagnostics.record_source_call(source.name, kind="single")
-                self.metrics.observe(
-                    "source_capacity_wait_ms",
-                    self.elapsed_ms(wait_started),
-                    source=source.name,
-                )
-                return self.coerce_payload(await source.fetch(key, context))
-
-        return await self.with_timeout(source, context, invoke, resource=key)
+        lease = await self.acquire_capacity(
+            source,
+            context,
+            resource=key,
+        )
+        try:
+            runtime.diagnostics.record_source_call(source.name, kind="single")
+            result = await self.with_timeout(
+                source,
+                context,
+                lambda: source.fetch(key, context),
+                resource=key,
+            )
+            return self.coerce_payload(result)
+        finally:
+            lease.release()
 
     async def fetch_many_once(
         self,
@@ -81,31 +98,35 @@ class SourceCalls:
         context: FetchContext,
         runtime: ResolutionRuntime,
     ) -> Mapping[ResourceKey, SourcePayload[Any]]:
-        async def invoke() -> Mapping[ResourceKey, SourcePayload[Any]]:
-            wait_started = self.clock.monotonic()
-            async with self.capacity.slot(source.name):
-                runtime.diagnostics.record_source_call(source.name, kind="batch")
-                self.metrics.observe(
-                    "source_capacity_wait_ms",
-                    self.elapsed_ms(wait_started),
-                    source=source.name,
+        lease = await self.acquire_capacity(
+            source,
+            context,
+            resource=None,
+        )
+        try:
+            runtime.diagnostics.record_source_call(source.name, kind="batch")
+            result = await self.with_timeout(
+                source,
+                context,
+                lambda: source.fetch_many(keys, context),
+                resource=None,
+            )
+            if not isinstance(result, Mapping):
+                raise SourceProtocolError(
+                    f"batch source {source.name} must return a mapping, got {type(result).__name__}"
                 )
-                result = await source.fetch_many(keys, context)
-                if not isinstance(result, Mapping):
-                    raise SourceProtocolError(
-                        f"batch source {source.name} must return a mapping, "
-                        f"got {type(result).__name__}"
-                    )
-                requested = set(keys)
-                unexpected = [key for key in result if key not in requested]
-                if unexpected:
-                    rendered = ", ".join(str(key) for key in unexpected)
-                    raise SourceProtocolError(
-                        f"batch source {source.name} returned unrequested resources: {rendered}"
-                    )
-                return {key: self.coerce_payload(value) for key, value in result.items()}
 
-        return await self.with_timeout(source, context, invoke, resource=None)
+            requested = set(keys)
+            unexpected = [key for key in result if key not in requested]
+            if unexpected:
+                rendered = ", ".join(str(key) for key in unexpected)
+                raise SourceProtocolError(
+                    f"batch source {source.name} returned unrequested resources: {rendered}"
+                )
+
+            return {key: self.coerce_payload(value) for key, value in result.items()}
+        finally:
+            lease.release()
 
     async def derive_once(
         self,
@@ -115,18 +136,76 @@ class SourceCalls:
         context: FetchContext,
         runtime: ResolutionRuntime,
     ) -> SourcePayload[Any]:
-        async def invoke() -> SourcePayload[Any]:
-            wait_started = self.clock.monotonic()
-            async with self.capacity.slot(source.name):
-                runtime.diagnostics.record_source_call(source.name, kind="derived")
-                self.metrics.observe(
-                    "source_capacity_wait_ms",
-                    self.elapsed_ms(wait_started),
-                    source=source.name,
-                )
-                return self.coerce_payload(await source.derive(key, dependencies, context))
+        lease = await self.acquire_capacity(
+            source,
+            context,
+            resource=key,
+        )
+        try:
+            runtime.diagnostics.record_source_call(source.name, kind="derived")
+            result = await self.with_timeout(
+                source,
+                context,
+                lambda: source.derive(key, dependencies, context),
+                resource=key,
+            )
+            return self.coerce_payload(result)
+        finally:
+            lease.release()
 
-        return await self.with_timeout(source, context, invoke, resource=key)
+    async def acquire_capacity(
+        self,
+        source: SourceBase,
+        context: FetchContext,
+        *,
+        resource: ResourceKey | None,
+    ) -> CapacityLease:
+        configured_queue_timeout = getattr(
+            source,
+            "queue_timeout_seconds",
+            source.timeout_seconds,
+        )
+        budget = self._timeout_budget(
+            configured_queue_timeout,
+            context,
+            source=source,
+            phase="waiting for capacity",
+            resource=resource,
+        )
+        wait_started = self.clock.monotonic()
+
+        try:
+            return await self._await_with_timeout(
+                lambda: self.capacity.acquire(source.name),
+                budget.seconds,
+            )
+        except _OperationTimedOut as error:
+            target = self._target_suffix(resource)
+            if budget.limited_by_deadline:
+                self.metrics.increment(
+                    "source_capacity_timeout_total",
+                    source=source.name,
+                    reason="snapshot_deadline",
+                )
+                raise SnapshotDeadlineExceededError(
+                    f"snapshot deadline exceeded while waiting for capacity "
+                    f"for source {source.name}{target}"
+                ) from error
+
+            self.metrics.increment(
+                "source_capacity_timeout_total",
+                source=source.name,
+                reason="queue_timeout",
+            )
+            raise SourceQueueTimeoutError(
+                f"source {source.name} waited more than {budget.seconds:.3f}s for capacity{target}"
+            ) from error
+        finally:
+            self.metrics.observe(
+                "source_capacity_wait_ms",
+                self.elapsed_ms(wait_started),
+                source=source.name,
+            )
 
     async def with_timeout(
         self,
@@ -136,16 +215,27 @@ class SourceCalls:
         *,
         resource: ResourceKey | None,
     ) -> T:
-        timeout = self.effective_timeout(source, context)
+        budget = self._timeout_budget(
+            source.timeout_seconds,
+            context,
+            source=source,
+            phase="calling the source",
+            resource=resource,
+        )
         try:
-            if timeout is None:
-                return await operation()
-            return await asyncio.wait_for(operation(), timeout=timeout)
-        except (TimeoutError, asyncio.TimeoutError) as error:
-            target = f" while resolving {resource}" if resource is not None else ""
+            return await self._await_with_timeout(
+                operation,
+                budget.seconds,
+            )
+        except _OperationTimedOut as error:
+            target = self._target_suffix(resource)
+            if budget.limited_by_deadline:
+                raise SnapshotDeadlineExceededError(
+                    f"snapshot deadline exceeded while calling source {source.name}{target}"
+                ) from error
 
             raise SourceTimeoutError(
-                f"source {source.name} timed out after {timeout:.3f}s{target}"
+                f"source {source.name} timed out after {budget.seconds:.3f}s{target}"
             ) from error
 
     def effective_timeout(
@@ -153,16 +243,15 @@ class SourceCalls:
         source: SourceBase,
         context: FetchContext,
     ) -> float | None:
-        timeout = source.timeout_seconds
-        if context.deadline_monotonic is None:
-            return timeout
+        """Return the effective source-call timeout for compatibility."""
 
-        remaining = context.deadline_monotonic - self.clock.monotonic()
-        if remaining <= 0:
-            raise SourceTimeoutError(
-                f"snapshot deadline exceeded before resolving source {source.name}"
-            )
-        return remaining if timeout is None else min(timeout, remaining)
+        return self._timeout_budget(
+            source.timeout_seconds,
+            context,
+            source=source,
+            phase="resolving",
+            resource=None,
+        ).seconds
 
     def snapshot_value(
         self,
@@ -201,6 +290,16 @@ class SourceCalls:
 
     @staticmethod
     def is_retryable(error: Exception) -> bool:
+        if isinstance(
+            error,
+            (
+                CircuitOpenError,
+                SnapshotDeadlineExceededError,
+                SourceQueueTimeoutError,
+            ),
+        ):
+            return False
+
         return isinstance(
             error,
             (
@@ -209,7 +308,7 @@ class SourceCalls:
                 ConnectionError,
                 OSError,
             ),
-        ) and not isinstance(error, CircuitOpenError)
+        )
 
     def validate_payload_timestamp(
         self,
@@ -297,3 +396,60 @@ class SourceCalls:
             message=str(error),
             attempts=attempts,
         )
+
+    def _timeout_budget(
+        self,
+        configured_timeout: float | None,
+        context: FetchContext,
+        *,
+        source: SourceBase,
+        phase: str,
+        resource: ResourceKey | None,
+    ) -> _TimeoutBudget:
+        if context.deadline_monotonic is None:
+            return _TimeoutBudget(configured_timeout)
+
+        remaining = context.deadline_monotonic - self.clock.monotonic()
+        target = self._target_suffix(resource)
+        if remaining <= 0:
+            raise SnapshotDeadlineExceededError(
+                f"snapshot deadline exceeded before {phase} for source {source.name}{target}"
+            )
+
+        if configured_timeout is None or remaining <= configured_timeout:
+            return _TimeoutBudget(
+                seconds=remaining,
+                limited_by_deadline=True,
+            )
+
+        return _TimeoutBudget(configured_timeout)
+
+    @staticmethod
+    async def _await_with_timeout(
+        operation: Callable[[], Awaitable[T]],
+        timeout_seconds: float | None,
+    ) -> T:
+        if timeout_seconds is None:
+            return await operation()
+
+        task = asyncio.ensure_future(operation())
+        try:
+            completed, _pending = await asyncio.wait(
+                (task,),
+                timeout=timeout_seconds,
+            )
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+        if task in completed:
+            return await task
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise _OperationTimedOut
+
+    @staticmethod
+    def _target_suffix(resource: ResourceKey | None) -> str:
+        return f" while resolving {resource}" if resource is not None else ""

@@ -81,18 +81,26 @@ class CircuitBreaker:
         normalized_source = str(source or "").strip()
         if not normalized_source:
             raise ValueError("source name cannot be empty")
+
         resolved_scope = scope or self.default_policy.scope
         if resolved_scope is CircuitScope.SOURCE:
             return CircuitIdentity(normalized_source, resolved_scope)
+
         if key is None:
             raise ValueError(f"resource key is required for circuit scope {resolved_scope.value}")
+
         if resolved_scope is CircuitScope.NAMESPACE:
             discriminator = key.namespace
         elif resolved_scope is CircuitScope.SUBJECT:
             discriminator = key.subject or f"{key.namespace}:{key.name}"
         else:
             discriminator = str(key)
-        return CircuitIdentity(normalized_source, resolved_scope, discriminator)
+
+        return CircuitIdentity(
+            normalized_source,
+            resolved_scope,
+            discriminator,
+        )
 
     async def before_call(
         self,
@@ -102,7 +110,11 @@ class CircuitBreaker:
         policy: CircuitBreakerPolicy | None = None,
     ) -> CircuitIdentity:
         resolved_policy = policy or self.default_policy
-        identity = self.identity_for(source, key=key, scope=resolved_policy.scope)
+        identity = self.identity_for(
+            source,
+            key=key,
+            scope=resolved_policy.scope,
+        )
         if not resolved_policy.enabled:
             return identity
 
@@ -119,6 +131,7 @@ class CircuitBreaker:
 
             if circuit.half_open_probe_active:
                 raise CircuitOpenError(f"half-open probe already active for {identity}")
+
             circuit.half_open_probe_active = True
             return identity
 
@@ -132,7 +145,12 @@ class CircuitBreaker:
         resolved_policy = policy or self.default_policy
         if not resolved_policy.enabled:
             return
-        identity = self.identity_for(source, key=key, scope=resolved_policy.scope)
+
+        identity = self.identity_for(
+            source,
+            key=key,
+            scope=resolved_policy.scope,
+        )
         async with self._lock:
             circuit = self._circuits.setdefault(identity, _Circuit())
             circuit.state = CircuitState.CLOSED
@@ -150,7 +168,12 @@ class CircuitBreaker:
         resolved_policy = policy or self.default_policy
         if not resolved_policy.enabled:
             return
-        identity = self.identity_for(source, key=key, scope=resolved_policy.scope)
+
+        identity = self.identity_for(
+            source,
+            key=key,
+            scope=resolved_policy.scope,
+        )
         async with self._lock:
             circuit = self._circuits.setdefault(identity, _Circuit())
             circuit.half_open_probe_active = False
@@ -174,14 +197,46 @@ class CircuitBreaker:
         resolved_policy = policy or self.default_policy
         if not resolved_policy.enabled:
             return
-        identity = self.identity_for(source, key=key, scope=resolved_policy.scope)
+
+        identity = self.identity_for(
+            source,
+            key=key,
+            scope=resolved_policy.scope,
+        )
         async with self._lock:
             circuit = self._circuits.get(identity)
             if circuit is None:
                 return
+
             if circuit.state is CircuitState.HALF_OPEN and circuit.half_open_probe_active:
                 circuit.state = CircuitState.OPEN
                 circuit.opened_at = self.clock.monotonic()
+
+            circuit.half_open_probe_active = False
+
+    async def record_skipped(
+        self,
+        source: str,
+        *,
+        key: ResourceKey | None = None,
+        policy: CircuitBreakerPolicy | None = None,
+    ) -> None:
+        """Release a probe when no source outcome was produced."""
+
+        resolved_policy = policy or self.default_policy
+        if not resolved_policy.enabled:
+            return
+
+        identity = self.identity_for(
+            source,
+            key=key,
+            scope=resolved_policy.scope,
+        )
+        async with self._lock:
+            circuit = self._circuits.get(identity)
+            if circuit is None:
+                return
+
             circuit.half_open_probe_active = False
 
     async def state_for(
@@ -194,7 +249,12 @@ class CircuitBreaker:
         resolved_policy = policy or self.default_policy
         if not resolved_policy.enabled:
             return CircuitState.CLOSED
-        identity = self.identity_for(source, key=key, scope=resolved_policy.scope)
+
+        identity = self.identity_for(
+            source,
+            key=key,
+            scope=resolved_policy.scope,
+        )
         async with self._lock:
             return self._circuits.get(identity, _Circuit()).state
 
@@ -223,6 +283,11 @@ class CircuitBreaker:
             if source is None:
                 self._circuits.clear()
                 return
+
             resolved_policy = policy or self.default_policy
-            identity = self.identity_for(source, key=key, scope=resolved_policy.scope)
+            identity = self.identity_for(
+                source,
+                key=key,
+                scope=resolved_policy.scope,
+            )
             self._circuits.pop(identity, None)
