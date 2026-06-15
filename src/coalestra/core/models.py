@@ -9,6 +9,7 @@ from typing import Any, Generic, TypeVar, cast
 
 from coalestra.core.diagnostics import SnapshotDiagnostics
 from coalestra.core.keys import ResourceKey as ResourceKey
+from coalestra.core.quality import require_finite_timestamp
 
 T = TypeVar("T")
 
@@ -43,14 +44,21 @@ class FreshnessPolicy:
         if self.ttl_seconds < 0:
             raise ValueError("ttl_seconds cannot be negative")
         if self.max_stale_seconds < self.ttl_seconds:
-            raise ValueError("max_stale_seconds must be greater than or equal to ttl_seconds")
+            raise ValueError(
+                "max_stale_seconds must be greater than or equal to ttl_seconds"
+            )
         if self.refresh_ahead_seconds < 0:
             raise ValueError("refresh_ahead_seconds cannot be negative")
         if self.refresh_mode is RefreshMode.REFRESH_AHEAD:
-            if isfinite(self.ttl_seconds) and self.refresh_ahead_seconds > self.ttl_seconds:
+            if (
+                isfinite(self.ttl_seconds)
+                and self.refresh_ahead_seconds > self.ttl_seconds
+            ):
                 raise ValueError("refresh_ahead_seconds cannot exceed ttl_seconds")
         elif self.refresh_ahead_seconds != 0:
-            raise ValueError("refresh_ahead_seconds is only valid with RefreshMode.REFRESH_AHEAD")
+            raise ValueError(
+                "refresh_ahead_seconds is only valid with RefreshMode.REFRESH_AHEAD"
+            )
 
     def should_refresh_ahead(self, age_seconds: float) -> bool:
         """Whether a still-fresh value has entered its proactive refresh window."""
@@ -74,6 +82,26 @@ class FetchContext:
     snapshot_id: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "requested_at",
+            require_finite_timestamp(self.requested_at, name="requested_at"),
+        )
+        if self.deadline_at is not None:
+            object.__setattr__(
+                self,
+                "deadline_at",
+                require_finite_timestamp(self.deadline_at, name="deadline_at"),
+            )
+        if self.deadline_monotonic is not None:
+            object.__setattr__(
+                self,
+                "deadline_monotonic",
+                require_finite_timestamp(
+                    self.deadline_monotonic,
+                    name="deadline_monotonic",
+                ),
+            )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
@@ -86,6 +114,12 @@ class SourcePayload(Generic[T]):
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.observed_at is not None:
+            object.__setattr__(
+                self,
+                "observed_at",
+                require_finite_timestamp(self.observed_at, name="observed_at"),
+            )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
@@ -106,6 +140,16 @@ class SnapshotValue(Generic[T]):
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "observed_at",
+            require_finite_timestamp(self.observed_at, name="observed_at"),
+        )
+        object.__setattr__(
+            self,
+            "fetched_at",
+            require_finite_timestamp(self.fetched_at, name="fetched_at"),
+        )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
@@ -147,6 +191,11 @@ class Snapshot(Mapping[ResourceKey, SnapshotValue[Any]]):
     diagnostics: SnapshotDiagnostics = field(default_factory=SnapshotDiagnostics)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "created_at",
+            require_finite_timestamp(self.created_at, name="created_at"),
+        )
         object.__setattr__(self, "resources", MappingProxyType(dict(self.resources)))
         object.__setattr__(self, "errors", MappingProxyType(dict(self.errors)))
 
@@ -169,7 +218,9 @@ class Snapshot(Mapping[ResourceKey, SnapshotValue[Any]]):
             )
         return cast(T, item)
 
-    def maybe_value(self, key: ResourceKey, expected_type: type[T] | None = None) -> T | None:
+    def maybe_value(
+        self, key: ResourceKey, expected_type: type[T] | None = None
+    ) -> T | None:
         """Return a resource value or ``None`` when the key was not resolved.
 
         This is intended for explicitly optional resources. Required resources should use

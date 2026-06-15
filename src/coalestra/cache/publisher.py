@@ -26,7 +26,7 @@ from coalestra.core.protocols import (
     FreshnessPolicyProvider,
     MetricsSink,
 )
-from coalestra.core.quality import ObservationPolicy
+from coalestra.core.quality import ObservationPolicy, require_finite_timestamp
 
 T = TypeVar("T")
 
@@ -52,6 +52,12 @@ class ResourceUpdate(Generic[T]):
         if not normalized_source:
             raise ValueError("source name cannot be empty")
         object.__setattr__(self, "source", normalized_source)
+        if self.observed_at is not None:
+            object.__setattr__(
+                self,
+                "observed_at",
+                require_finite_timestamp(self.observed_at, name="observed_at"),
+            )
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
@@ -154,7 +160,9 @@ class ResourcePublisher:
             unique: dict[ResourceKey, ResourceUpdate[Any]] = {}
             effective_times: dict[ResourceKey, float] = {}
             for update in update_list:
-                observed_at = now if update.observed_at is None else float(update.observed_at)
+                observed_at = (
+                    now if update.observed_at is None else float(update.observed_at)
+                )
                 self._validate_observed_at(update.key, observed_at, now=now)
                 previous_time = effective_times.get(update.key)
                 if previous_time is None or observed_at >= previous_time:
@@ -167,7 +175,9 @@ class ResourcePublisher:
             legacy_writes: list[SnapshotValue[Any]] = []
 
             for key, update in unique.items():
-                observed_at = now if update.observed_at is None else float(update.observed_at)
+                observed_at = (
+                    now if update.observed_at is None else float(update.observed_at)
+                )
                 previous = previous_values.get(key)
                 policy = self.policy_resolver.resolve(key)
                 future_seconds = max(0.0, observed_at - now)
@@ -222,9 +232,12 @@ class ResourcePublisher:
                 missing = tuple(key for key in unique if key not in atomic_results)
                 if missing:
                     rendered = ", ".join(str(key) for key in missing)
-                    raise RuntimeError(f"atomic cache omitted write results for: {rendered}")
+                    raise RuntimeError(
+                        f"atomic cache omitted write results for: {rendered}"
+                    )
                 results = {
-                    key: self._publish_result_from_cache(atomic_results[key]) for key in unique
+                    key: self._publish_result_from_cache(atomic_results[key])
+                    for key in unique
                 }
 
             for key, result in results.items():
@@ -267,7 +280,10 @@ class ResourcePublisher:
             lookups = await self.cache.get_many(keys, now=now, policies=policies)
         else:
             completed = await asyncio.gather(
-                *(self.cache.get(key, now=now, policy=self._all_values_policy) for key in keys)
+                *(
+                    self.cache.get(key, now=now, policy=self._all_values_policy)
+                    for key in keys
+                )
             )
             lookups = dict(zip(keys, completed, strict=True))
         return {key: lookups[key].value for key in keys}
@@ -329,7 +345,18 @@ class ResourcePublisher:
         *,
         now: float,
     ) -> None:
-        future_seconds = observed_at - now
+        try:
+            normalized_observed_at = require_finite_timestamp(
+                observed_at,
+                name="observed_at",
+            )
+            normalized_now = require_finite_timestamp(now, name="current time")
+        except ValueError as error:
+            raise SourceProtocolError(
+                f"invalid published observation for {key}: {error}"
+            ) from error
+
+        future_seconds = normalized_observed_at - normalized_now
         if (
             future_seconds > self.observation_policy.future_tolerance_seconds
             and self.observation_policy.reject_future_observations
