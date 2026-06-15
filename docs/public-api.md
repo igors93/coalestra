@@ -40,7 +40,7 @@ Constructor compatibility is preserved for `retry_policy`, `circuit_breaker`, an
 
 ### `SnapshotSession`
 
-Created with `builder.session(...)`. Supports incremental `resolve()` calls, one deadline, and pinned values.
+Created with `builder.session(...)`. Supports incremental `resolve()` calls, one deadline, pinned values, and transactional selective revalidation.
 
 ```python
 async with builder.session(deadline_seconds=3.0) as session:
@@ -51,12 +51,19 @@ async with builder.session(deadline_seconds=3.0) as session:
 Methods and properties:
 
 - `resolve(keys, strict=True, retry_errors=False) -> Snapshot`
+- `revalidate(keys, strict=True, force_refresh=False) -> Snapshot`
 - `snapshot() -> Snapshot`
 - `close()`
 - `snapshot_id`
 - `created_at`
 - `context`
 - `closed`
+
+`revalidate()` removes only the selected revisions and their already-pinned derived dependents from
+the session staging memo. It reads newer cache or publication revisions by default.
+`force_refresh=True` bypasses the shared cache for every affected key. The staged state is committed
+only when every affected visible resource succeeds. A failed non-strict call returns the retained
+previous values with transient errors that are not persisted in the session.
 
 ### `SyncSnapshotBuilder` and `SyncSnapshotSession`
 

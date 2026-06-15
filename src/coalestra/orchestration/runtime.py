@@ -50,3 +50,14 @@ class ResolutionRuntime:
     diagnostics: DiagnosticsCollector
     memo: dict[ResourceKey, SnapshotValue[Any]] = field(default_factory=dict)
     cache_stale_results: bool = True
+    force_refresh_keys: set[ResourceKey] = field(default_factory=set)
+
+    def requires_refresh(self, key: ResourceKey) -> bool:
+        """Return whether ``key`` must bypass pinned and cached values."""
+
+        return key in self.force_refresh_keys
+
+    def mark_refreshed(self, key: ResourceKey) -> None:
+        """Allow later dependency reads to reuse a successfully refreshed value."""
+
+        self.force_refresh_keys.discard(key)

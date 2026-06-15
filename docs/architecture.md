@@ -68,6 +68,15 @@ Capacity is not session-local. Every session and direct build shares the builder
 
 Successful values are pinned even if their normal cache TTL expires between stages. Dependency resources remain internal until explicitly requested. `retry_errors=True` retries selected failed keys without changing session identity or deadline.
 
+Selective revalidation creates a staging runtime from the current session memo, removes the selected
+keys plus every memoized derived dependent, and resolves the affected visible set again under the
+original identity and deadline. Normal revalidation can observe newer cache or publisher revisions;
+source-forced revalidation bypasses the shared cache. The staged memo is committed atomically only
+when all affected visible resources succeed. Failures retain the entire previous session state.
+
+Nested single-flight ownership is inherited while resolving revalidation dependencies. This prevents
+a derived resource from waiting on a dependency already owned by the same resolution tree.
+
 ## Capacity model
 
 The builder owns one global `CapacityLimiter` and zero or more source limiters.

@@ -158,6 +158,24 @@ class SyncSnapshotSession:
             self._session.resolve_request(request, retry_errors=retry_errors)
         )
 
+    def revalidate(
+        self,
+        keys: Iterable[ResourceKey],
+        *,
+        strict: bool = True,
+        force_refresh: bool = False,
+    ) -> Snapshot:
+        """Refresh selected pinned resources transactionally."""
+
+        self._ensure_open()
+        return self._owner._submit(
+            self._session.revalidate(
+                keys,
+                strict=strict,
+                force_refresh=force_refresh,
+            )
+        )
+
     def snapshot(self) -> Snapshot:
         self._ensure_open()
         return self._owner._submit(self._snapshot_async())

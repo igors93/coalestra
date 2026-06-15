@@ -357,7 +357,23 @@ class SnapshotBuilder:
         stale_candidates: dict[ResourceKey, SnapshotValue[Any]] = {}
         cache_keys: list[ResourceKey] = []
 
+        pending: list[ResourceKey] = []
         for key in unique_keys:
+            if runtime.requires_refresh(key):
+                runtime.diagnostics.cache_misses += 1
+                self.metrics.increment(
+                    "cache_access_total",
+                    status="revalidation_bypass",
+                    resource=str(key),
+                )
+                self.events.emit(
+                    "cache_bypassed",
+                    resource=str(key),
+                    reason="session_revalidation",
+                )
+                pending.append(key)
+                continue
+
             memoized = runtime.memo.get(key)
             if memoized is not None:
                 values[key] = memoized
@@ -371,8 +387,6 @@ class SnapshotBuilder:
             policies=policies,
             diagnostics=runtime.diagnostics,
         )
-        pending: list[ResourceKey] = []
-
         for key in cache_keys:
             lookup = lookups[key]
             policy = policies[key]
@@ -440,8 +454,11 @@ class SnapshotBuilder:
             return values, errors
 
         resolution_results: dict[ResourceKey, tuple[ResolutionResult, bool]] = {}
-        directly_owned = tuple(key for key in pending if key in local_owned)
-        shared_pending = tuple(key for key in pending if key not in local_owned)
+        directly_owned = tuple(
+            key for key in pending if key in local_owned or runtime.requires_refresh(key)
+        )
+        directly_owned_set = frozenset(directly_owned)
+        shared_pending = tuple(key for key in pending if key not in directly_owned_set)
 
         if directly_owned:
             direct_results = await self._resolve_owned_keys(
@@ -449,7 +466,7 @@ class SnapshotBuilder:
                 context=context,
                 runtime=runtime,
                 ancestry=ancestry,
-                local_owned=local_owned,
+                local_owned=local_owned | directly_owned_set,
             )
             resolution_results.update(
                 {key: (result, False) for key, result in direct_results.items()}
@@ -463,7 +480,7 @@ class SnapshotBuilder:
                     context=context,
                     runtime=runtime,
                     ancestry=ancestry,
-                    local_owned=frozenset(owned),
+                    local_owned=local_owned | frozenset(owned),
                 ),
             )
             resolution_results.update(flight_results)
@@ -480,6 +497,7 @@ class SnapshotBuilder:
                         metadata={**value.metadata, "coalesced_request": True},
                     )
                 runtime.memo[key] = value
+                runtime.mark_refreshed(key)
                 values[key] = value
                 if value.stale:
                     runtime.diagnostics.stale_values += 1
@@ -488,7 +506,11 @@ class SnapshotBuilder:
             error = cast(Exception, result.error)
             policy = self.policy_resolver.resolve(key)
             stale_candidate = stale_candidates.get(key)
-            if stale_candidate is not None and policy.allow_stale_on_error:
+            if (
+                stale_candidate is not None
+                and policy.allow_stale_on_error
+                and not runtime.requires_refresh(key)
+            ):
                 runtime.diagnostics.stale_values += 1
                 self.metrics.increment(
                     "cache_access_total",
@@ -531,6 +553,8 @@ class SnapshotBuilder:
 
         for source in self.sources:
             for key in tuple(unresolved):
+                if runtime.requires_refresh(key):
+                    continue
                 memoized = runtime.memo.get(key)
                 if memoized is not None:
                     resolved[key] = ResolutionResult(value=memoized)
@@ -633,6 +657,7 @@ class SnapshotBuilder:
 
                 fresh_values.append(value)
                 runtime.memo[key] = value
+                runtime.mark_refreshed(key)
                 resolved[key] = ResolutionResult(value=value)
                 self.metrics.increment("source_fetch_total", status="success", source=source.name)
                 self.metrics.observe(
@@ -660,7 +685,11 @@ class SnapshotBuilder:
         for key in unresolved:
             policy = self.policy_resolver.resolve(key)
             stale = best_stale.get(key)
-            if stale is not None and policy.allow_stale_on_error:
+            if (
+                stale is not None
+                and policy.allow_stale_on_error
+                and not runtime.requires_refresh(key)
+            ):
                 stale_to_cache.append(stale)
                 runtime.memo[key] = stale
                 self.metrics.increment("source_fetch_total", status="stale", source=stale.source)

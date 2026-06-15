@@ -244,6 +244,28 @@ Successful values remain pinned inside the session. Existing errors can be retri
 await session.resolve([KEY], retry_errors=True)
 ```
 
+Critical resources can be revalidated without replacing unrelated pinned values:
+
+```python
+updated = await session.revalidate([POSITION, OPEN_ORDERS])
+```
+
+Revalidation reads the newest shared-cache or published revisions by default. Use
+`force_refresh=True` when the selected resources must bypass the shared cache and be acquired from
+the source chain again:
+
+```python
+updated = await session.revalidate(
+    [POSITION, OPEN_ORDERS],
+    force_refresh=True,
+)
+```
+
+Pinned derived values that depend on a selected resource are refreshed transitively. The operation
+is transactional: all affected visible values are committed together, or the previous session state
+is retained. With `strict=False`, a failed attempt returns the retained values plus transient errors
+for that call; those errors are not stored in the session.
+
 ## Derived resources
 
 Derived sources declare dependencies and calculate a resource from an immutable dependency snapshot.

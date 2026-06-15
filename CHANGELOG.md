@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added transactional selective revalidation for pinned session resources.
+- Refreshed already-pinned derived dependents transitively when a dependency is revalidated.
+- Added optional source-forced revalidation while preserving newer cache and publication reads by default.
+- Preserved the previous session state when any affected resource fails revalidation.
+
 ## 0.5.3 - 2026-06-15
 
 - Added deep payload isolation across source, cache, publisher, single-flight, derived, session, and snapshot boundaries.
