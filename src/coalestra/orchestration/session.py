@@ -8,7 +8,8 @@ from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotV
 from coalestra.core.request import SnapshotRequest
 
 if TYPE_CHECKING:
-    from coalestra.orchestration.builder import SnapshotBuilder, _ResolutionRuntime
+    from coalestra.orchestration.builder import SnapshotBuilder
+    from coalestra.orchestration.runtime import ResolutionRuntime
 
 
 class SnapshotSession:
@@ -25,7 +26,7 @@ class SnapshotSession:
         *,
         builder: SnapshotBuilder,
         context: FetchContext,
-        runtime: _ResolutionRuntime,
+        runtime: ResolutionRuntime,
     ) -> None:
         self._builder = builder
         self._context = context

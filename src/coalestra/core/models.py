@@ -44,21 +44,14 @@ class FreshnessPolicy:
         if self.ttl_seconds < 0:
             raise ValueError("ttl_seconds cannot be negative")
         if self.max_stale_seconds < self.ttl_seconds:
-            raise ValueError(
-                "max_stale_seconds must be greater than or equal to ttl_seconds"
-            )
+            raise ValueError("max_stale_seconds must be greater than or equal to ttl_seconds")
         if self.refresh_ahead_seconds < 0:
             raise ValueError("refresh_ahead_seconds cannot be negative")
         if self.refresh_mode is RefreshMode.REFRESH_AHEAD:
-            if (
-                isfinite(self.ttl_seconds)
-                and self.refresh_ahead_seconds > self.ttl_seconds
-            ):
+            if isfinite(self.ttl_seconds) and self.refresh_ahead_seconds > self.ttl_seconds:
                 raise ValueError("refresh_ahead_seconds cannot exceed ttl_seconds")
         elif self.refresh_ahead_seconds != 0:
-            raise ValueError(
-                "refresh_ahead_seconds is only valid with RefreshMode.REFRESH_AHEAD"
-            )
+            raise ValueError("refresh_ahead_seconds is only valid with RefreshMode.REFRESH_AHEAD")
 
     def should_refresh_ahead(self, age_seconds: float) -> bool:
         """Whether a still-fresh value has entered its proactive refresh window."""
@@ -218,9 +211,7 @@ class Snapshot(Mapping[ResourceKey, SnapshotValue[Any]]):
             )
         return cast(T, item)
 
-    def maybe_value(
-        self, key: ResourceKey, expected_type: type[T] | None = None
-    ) -> T | None:
+    def maybe_value(self, key: ResourceKey, expected_type: type[T] | None = None) -> T | None:
         """Return a resource value or ``None`` when the key was not resolved.
 
         This is intended for explicitly optional resources. Required resources should use
