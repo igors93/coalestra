@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from typing import Any, Protocol, runtime_checkable
 
+from coalestra.core.authority import SourceAuthorityPolicy
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheLookup,
@@ -94,12 +95,27 @@ class FreshnessPolicyProvider(Protocol):
     def resolve(self, key: ResourceKey) -> FreshnessPolicy: ...
 
 
+class AuthorityPolicyProvider(Protocol):
+    """Resolve source-authority semantics for a resource."""
+
+    def resolve(self, key: ResourceKey) -> SourceAuthorityPolicy: ...
+
+    def rank_for(self, key: ResourceKey, source: str) -> int: ...
+
+
+@runtime_checkable
+class AuthorityAwareCache(Protocol):
+    """Cache capability declaring atomic source-authority validation."""
+
+    validates_source_authority: bool
+
+
 class AsyncCache(Protocol):
     """Minimal cache contract required by SnapshotBuilder.
 
-    ``set`` implementations should compare ``observed_at`` and write atomically so an older
-    observation cannot replace a newer one. Legacy caches remain structurally compatible, but
-    they cannot provide the complete monotonicity guarantee until they adopt that behavior.
+    ``set`` implementations should compare ``authority_rank`` before ``observed_at`` and write
+    atomically. Higher-authority revisions win; equal-authority revisions remain monotonic by
+    observation time. Legacy caches remain structurally compatible while authority is disabled.
     Implement :class:`AtomicAsyncCache` to expose authoritative write results and force options.
     """
 

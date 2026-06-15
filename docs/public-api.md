@@ -151,6 +151,7 @@ submit_publish(...) -> concurrent.futures.Future[PublishResult]
 - `ResourceUpdate[T]`
 - `PublishResult`
 - `PublishStatus.PUBLISHED`
+- `PublishStatus.IGNORED_LOWER_AUTHORITY`
 - `PublishStatus.IGNORED_OLDER`
 - `PublishStatus.IGNORED_DUPLICATE`
 
@@ -166,7 +167,18 @@ submit_publish(...) -> concurrent.futures.Future[PublishResult]
 
 `FetchContext.snapshot_id` identifies the enclosing build or session.
 
-`SnapshotValue.version` is an opaque identity for one resolved resource revision. `SnapshotValue.dependency_versions` records the exact dependency revisions used to produce a derived value. Cache implementations use these fields to reject derived entries whose dependencies have changed.
+`SnapshotValue.version` is an opaque identity for one resolved resource revision. `SnapshotValue.dependency_versions` records the exact dependency revisions used to produce a derived value. Cache implementations use these fields to reject derived entries whose dependencies have changed. `SnapshotValue.authority_rank` records the source-authority rank assigned when the revision was created.
+
+### Source authority
+
+- `SourceAuthorityPolicy`
+- `AuthorityPolicyResolver`
+- `AuthorityPolicyProvider`
+- `AuthorityAwareCache`
+
+`SourceAuthorityPolicy.source_ranks` maps source names to integer ranks. Higher ranks replace lower ranks regardless of observation time; equal ranks use the existing timestamp comparison. `SnapshotBuilder` accepts either `authority_policy=` or `authority_resolver=`. Providing both is rejected. Source `priority` remains responsible only for acquisition order.
+
+Configured authority rules require a cache that atomically compares `SnapshotValue.authority_rank` before `observed_at` and declares `validates_source_authority = True`. `AsyncMemoryCache` implements this capability. `force=True` on atomic writes or publications explicitly bypasses authority.
 
 ## Cache
 

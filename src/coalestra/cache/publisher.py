@@ -8,6 +8,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
+from coalestra.core.authority import AuthorityPolicyResolver
 from coalestra.core.errors import SourceProtocolError
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.keys import ResourceKey
@@ -34,6 +35,7 @@ T = TypeVar("T")
 
 class PublishStatus(str, Enum):
     PUBLISHED = "published"
+    IGNORED_LOWER_AUTHORITY = "ignored_lower_authority"
     IGNORED_OLDER = "ignored_older"
     IGNORED_DUPLICATE = "ignored_duplicate"
 
@@ -94,6 +96,7 @@ class ResourcePublisher:
         lock_stripes: int = 64,
         payload_copier: PayloadCopier | None = None,
         payload_isolator: PayloadIsolator | None = None,
+        authority_resolver: AuthorityPolicyResolver | None = None,
     ) -> None:
         if lock_stripes < 1:
             raise ValueError("lock_stripes must be at least 1")
@@ -104,6 +107,13 @@ class ResourcePublisher:
         self.events = events
         self.observation_policy = observation_policy or ObservationPolicy()
         self._payload_isolator = payload_isolator or PayloadIsolator(payload_copier)
+        self.authority_resolver = authority_resolver or AuthorityPolicyResolver()
+        if self.authority_resolver.has_rules and not bool(
+            getattr(cache, "validates_source_authority", False)
+        ):
+            raise ValueError(
+                "authority policies require a cache that declares validates_source_authority = True"
+            )
         self._locks = tuple(asyncio.Lock() for _ in range(lock_stripes))
         self._all_values_policy = FreshnessPolicy(
             ttl_seconds=float("inf"),
@@ -162,14 +172,16 @@ class ResourcePublisher:
         async with self._locked_keys(keys):
             now = self.clock.now()
             unique: dict[ResourceKey, ResourceUpdate[Any]] = {}
-            effective_times: dict[ResourceKey, float] = {}
+            effective_precedence: dict[ResourceKey, tuple[int, float]] = {}
             for update in update_list:
                 observed_at = now if update.observed_at is None else float(update.observed_at)
                 self._validate_observed_at(update.key, observed_at, now=now)
-                previous_time = effective_times.get(update.key)
-                if previous_time is None or observed_at >= previous_time:
+                authority_rank = self.authority_resolver.rank_for(update.key, update.source)
+                precedence = (authority_rank, observed_at)
+                previous_precedence = effective_precedence.get(update.key)
+                if previous_precedence is None or precedence >= previous_precedence:
                     unique[update.key] = update
-                    effective_times[update.key] = observed_at
+                    effective_precedence[update.key] = precedence
 
             previous_values = await self._get_existing(keys, now=now)
             provisional_results: dict[ResourceKey, PublishResult] = {}
@@ -198,6 +210,7 @@ class ResourcePublisher:
                     from_cache=False,
                     latency_ms=0.0,
                     attempts=0,
+                    authority_rank=self.authority_resolver.rank_for(key, update.source),
                     metadata=self._payload_isolator.copy_metadata(
                         published_metadata,
                         context=f"published metadata for {key}",
@@ -207,7 +220,7 @@ class ResourcePublisher:
 
                 ignored_status = self._ignored_status(
                     previous,
-                    observed_at=observed_at,
+                    candidate=candidate,
                     force=force,
                     replace_equal=replace_equal,
                 )
@@ -353,6 +366,7 @@ class ResourcePublisher:
     def _publish_result_from_cache(self, result: CacheWriteResult) -> PublishResult:
         statuses = {
             CacheWriteStatus.STORED: PublishStatus.PUBLISHED,
+            CacheWriteStatus.IGNORED_LOWER_AUTHORITY: PublishStatus.IGNORED_LOWER_AUTHORITY,
             CacheWriteStatus.IGNORED_OLDER: PublishStatus.IGNORED_OLDER,
             CacheWriteStatus.IGNORED_DUPLICATE: PublishStatus.IGNORED_DUPLICATE,
         }
@@ -403,15 +417,19 @@ class ResourcePublisher:
     def _ignored_status(
         previous: SnapshotValue[Any] | None,
         *,
-        observed_at: float,
+        candidate: SnapshotValue[Any],
         force: bool,
         replace_equal: bool,
     ) -> PublishStatus | None:
         if force or previous is None:
             return None
-        if previous.observed_at > observed_at:
+        if candidate.authority_rank < previous.authority_rank:
+            return PublishStatus.IGNORED_LOWER_AUTHORITY
+        if candidate.authority_rank > previous.authority_rank:
+            return None
+        if previous.observed_at > candidate.observed_at:
             return PublishStatus.IGNORED_OLDER
-        if previous.observed_at == observed_at and not replace_equal:
+        if previous.observed_at == candidate.observed_at and not replace_equal:
             return PublishStatus.IGNORED_DUPLICATE
         return None
 
@@ -435,6 +453,7 @@ class ResourcePublisher:
             observed_at=result.value.observed_at,
             replaced=result.previous is not None,
             forced=force,
+            authority_rank=result.value.authority_rank,
         )
 
     def _record_ignored(
@@ -456,6 +475,8 @@ class ResourcePublisher:
             status=result.status.value,
             observed_at=update.observed_at,
             cached_observed_at=previous.observed_at,
+            candidate_authority_rank=self.authority_resolver.rank_for(update.key, update.source),
+            cached_authority_rank=previous.authority_rank,
         )
 
     @asynccontextmanager

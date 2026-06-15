@@ -3,12 +3,25 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Collection, Mapping
 from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.isolation import PayloadIsolator
-from coalestra.core.models import CacheLookup, FreshnessPolicy, ResourceKey, SnapshotValue
-from coalestra.core.protocols import AsyncCache, BatchAsyncCache, Clock
+from coalestra.core.models import (
+    CacheLookup,
+    CacheWriteResult,
+    FreshnessPolicy,
+    ResourceKey,
+    SnapshotValue,
+)
+from coalestra.core.protocols import (
+    AsyncCache,
+    AtomicAsyncCache,
+    BatchAsyncCache,
+    BatchAtomicAsyncCache,
+    Clock,
+)
 
 
 class CacheAccess:
@@ -59,10 +72,10 @@ class CacheAccess:
         values: Collection[SnapshotValue[Any]],
         *,
         diagnostics: DiagnosticsCollector,
-    ) -> None:
+    ) -> Mapping[ResourceKey, CacheWriteResult] | None:
         unique = tuple({value.key: value for value in values}.values())
         if not unique:
-            return
+            return MappingProxyType({})
         isolated = tuple(
             self.payload_isolator.clone_snapshot_value(
                 value,
@@ -70,11 +83,20 @@ class CacheAccess:
             )
             for value in unique
         )
+        if isinstance(self.cache, BatchAtomicAsyncCache):
+            diagnostics.cache_batch_writes += 1
+            return await self.cache.set_many_if_newer(isolated)
+        if isinstance(self.cache, AtomicAsyncCache):
+            completed = await asyncio.gather(
+                *(self.cache.set_if_newer(value) for value in isolated)
+            )
+            return MappingProxyType({result.value.key: result for result in completed})
         if isinstance(self.cache, BatchAsyncCache):
             diagnostics.cache_batch_writes += 1
             await self.cache.set_many(isolated)
-            return
+            return None
         await asyncio.gather(*(self.cache.set(value) for value in isolated))
+        return None
 
     def cached_copy(
         self,

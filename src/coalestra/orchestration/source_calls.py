@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from coalestra.concurrency.capacity import CapacityController, CapacityLease
+from coalestra.core.authority import AuthorityPolicyResolver
 from coalestra.core.errors import (
     CircuitOpenError,
     SnapshotDeadlineExceededError,
@@ -60,6 +61,7 @@ class SourceCalls:
         events: EventSink,
         observation_policy: ObservationPolicy,
         payload_isolator: PayloadIsolator,
+        authority_resolver: AuthorityPolicyResolver,
     ) -> None:
         self.clock = clock
         self.capacity = capacity
@@ -69,6 +71,7 @@ class SourceCalls:
         self.events = events
         self.observation_policy = observation_policy
         self.payload_isolator = payload_isolator
+        self.authority_resolver = authority_resolver
 
     async def fetch_once(
         self,
@@ -298,6 +301,7 @@ class SourceCalls:
             latency_ms=latency_ms,
             attempts=attempts,
             metadata=metadata,
+            authority_rank=self.authority_resolver.rank_for(key, source.name),
             dependency_versions=dependency_versions or {},
         )
 

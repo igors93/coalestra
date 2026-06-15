@@ -1,3 +1,8 @@
+from coalestra.core.authority import (
+    AuthorityPolicyResolver,
+    AuthorityResolver,
+    SourceAuthorityPolicy,
+)
 from coalestra.core.clock import SystemClock
 from coalestra.core.diagnostics import DiagnosticsCollector, SnapshotDiagnostics
 from coalestra.core.errors import (
@@ -39,6 +44,8 @@ from coalestra.core.models import (
 from coalestra.core.protocols import (
     AsyncCache,
     AtomicAsyncCache,
+    AuthorityAwareCache,
+    AuthorityPolicyProvider,
     BatchAsyncCache,
     BatchAtomicAsyncCache,
     BatchSizedSource,
@@ -63,6 +70,10 @@ __all__ = [
     "PRESERVE_KEY_NORMALIZER",
     "AsyncCache",
     "AtomicAsyncCache",
+    "AuthorityAwareCache",
+    "AuthorityPolicyProvider",
+    "AuthorityPolicyResolver",
+    "AuthorityResolver",
     "BatchAsyncCache",
     "BatchAtomicAsyncCache",
     "BatchSizedSource",
@@ -102,6 +113,7 @@ __all__ = [
     "SnapshotSource",
     "SnapshotValue",
     "Source",
+    "SourceAuthorityPolicy",
     "SourceBase",
     "SourceFailure",
     "SourcePayload",

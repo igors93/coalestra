@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from coalestra.cache.memory import AsyncMemoryCache
 from coalestra.cache.publisher import ResourcePublisher
 from coalestra.concurrency.capacity import CapacityController, CapacitySnapshot
+from coalestra.core.authority import AuthorityPolicyResolver, SourceAuthorityPolicy
 from coalestra.core.clock import SystemClock
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.errors import (
@@ -19,6 +20,7 @@ from coalestra.core.errors import (
 from coalestra.core.health import BuilderHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
+    CacheWriteStatus,
     FetchContext,
     FreshnessPolicy,
     RefreshMode,
@@ -71,6 +73,8 @@ class SnapshotBuilder:
         *,
         default_policy: FreshnessPolicy | None = None,
         policy_resolver: PolicyResolver | None = None,
+        authority_policy: SourceAuthorityPolicy | None = None,
+        authority_resolver: AuthorityPolicyResolver | None = None,
         cache: AsyncCache | None = None,
         single_flight: SingleFlight[ResourceKey, ResolutionResult] | None = None,
         retry_policy: RetryPolicy | None = None,
@@ -89,6 +93,9 @@ class SnapshotBuilder:
         manage_lifecycle: bool = False,
         payload_copier: PayloadCopier | None = None,
     ) -> None:
+        if authority_policy is not None and authority_resolver is not None:
+            raise ValueError("authority_policy and authority_resolver cannot be provided together")
+
         source_list = list(sources)
         if not source_list:
             raise ValueError("at least one source is required")
@@ -103,6 +110,7 @@ class SnapshotBuilder:
             max_stale_seconds=10.0,
         )
         self.policy_resolver = policy_resolver or PolicyResolver(default)
+        self.authority_resolver = authority_resolver or AuthorityPolicyResolver(authority_policy)
         self._payload_isolator = PayloadIsolator(payload_copier)
         self.cache = cache or AsyncMemoryCache(payload_copier=payload_copier)
         self.single_flight = single_flight or SingleFlight()
@@ -158,6 +166,7 @@ class SnapshotBuilder:
             events=self.events,
             observation_policy=self.observation_policy,
             payload_isolator=self._payload_isolator,
+            authority_resolver=self.authority_resolver,
         )
         self._source_executor = SourceExecutor(
             source_catalog=self._source_catalog,
@@ -182,6 +191,7 @@ class SnapshotBuilder:
             events=self.events,
             observation_policy=self.observation_policy,
             payload_isolator=self._payload_isolator,
+            authority_resolver=self.authority_resolver,
         )
 
     @property
@@ -672,10 +682,51 @@ class SnapshotBuilder:
                     latency_ms=attempt.latency_ms,
                     attempts=attempt.attempts,
                     source_kind=self._source_catalog.kind(source),
+                    authority_rank=value.authority_rank,
                 )
 
             if fresh_values:
-                await self._cache_access.set_many(fresh_values, diagnostics=runtime.diagnostics)
+                write_results = await self._cache_access.set_many(
+                    fresh_values,
+                    diagnostics=runtime.diagnostics,
+                )
+                if write_results is not None:
+                    for candidate in fresh_values:
+                        write_result = write_results.get(candidate.key)
+                        if (
+                            write_result is None
+                            or write_result.status is not CacheWriteStatus.IGNORED_LOWER_AUTHORITY
+                        ):
+                            continue
+                        winner = write_result.value
+                        winner_policy = self.policy_resolver.resolve(candidate.key)
+                        winner_age = max(0.0, self.clock.now() - winner.observed_at)
+                        if winner_age > winner_policy.ttl_seconds:
+                            continue
+                        authoritative = self._cache_access.cached_copy(
+                            winner,
+                            stale=False,
+                            extra_metadata={
+                                "superseded_source": candidate.source,
+                                "superseded_authority_rank": candidate.authority_rank,
+                                "cache_write_status": write_result.status.value,
+                            },
+                        )
+                        runtime.memo[candidate.key] = authoritative
+                        resolved[candidate.key] = ResolutionResult(value=authoritative)
+                        self.metrics.increment(
+                            "source_fetch_superseded_total",
+                            source=candidate.source,
+                        )
+                        self.events.emit(
+                            "resource_resolution_superseded",
+                            resource=str(candidate.key),
+                            candidate_source=candidate.source,
+                            candidate_authority_rank=candidate.authority_rank,
+                            winning_source=authoritative.source,
+                            winning_authority_rank=authoritative.authority_rank,
+                            cache_write_status=write_result.status.value,
+                        )
 
             unresolved = [key for key in unresolved if key not in resolved]
             if not unresolved:

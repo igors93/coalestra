@@ -28,9 +28,10 @@ class RefreshMode(str, Enum):
 
 
 class CacheWriteStatus(str, Enum):
-    """Outcome of an atomic monotonic cache write."""
+    """Outcome of an atomic authority-aware cache write."""
 
     STORED = "stored"
+    IGNORED_LOWER_AUTHORITY = "ignored_lower_authority"
     IGNORED_OLDER = "ignored_older"
     IGNORED_DUPLICATE = "ignored_duplicate"
 
@@ -136,6 +137,7 @@ class SnapshotValue(Generic[T]):
     latency_ms: float
     attempts: int = 1
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    authority_rank: int = field(default=0, compare=False)
     version: str = field(default_factory=_new_resource_version, compare=False)
     dependency_versions: Mapping[ResourceKey, str] = field(
         default_factory=dict,
@@ -153,6 +155,7 @@ class SnapshotValue(Generic[T]):
             "fetched_at",
             require_finite_timestamp(self.fetched_at, name="fetched_at"),
         )
+        object.__setattr__(self, "authority_rank", int(self.authority_rank))
         normalized_version = str(self.version).strip()
         if not normalized_version:
             raise ValueError("version cannot be empty")

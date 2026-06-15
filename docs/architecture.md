@@ -157,7 +157,21 @@ Invalidation removes a resource from the shared cache, causing normal source res
 
 The cache stores acquired, derived, and published `SnapshotValue` instances. A session additionally pins values in its private memo.
 
-The publisher requests cached values with an unbounded freshness window only to compare observation timestamps. Normal builder reads continue to use each resource's configured `FreshnessPolicy`.
+The publisher requests cached values with an unbounded freshness window to compare source authority and observation timestamps. Normal builder reads continue to use each resource's configured `FreshnessPolicy`.
+
+## Source-authority model
+
+Acquisition priority and cache authority are separate concerns. Priority determines which source is attempted first when a resource must be resolved. Authority determines whether a newly acquired or published revision may replace the revision already stored for the same key.
+
+Each `SnapshotValue` carries the resolved `authority_rank`. Atomic cache writes compare revisions in this order:
+
+1. an explicit forced write wins;
+2. a higher authority rank wins;
+3. a lower authority rank is rejected;
+4. equal ranks compare `observed_at`;
+5. equal rank and timestamp follow `replace_equal`.
+
+This permits policies such as reconciled local state above event streams above REST, or equal local and stream authority with REST below both. Freshness remains orthogonal: a high-authority value can still expire under its `FreshnessPolicy`. Persistent caches must be cleared when authority ranks change because ranks are stored with revisions.
 
 ## Consistency model
 
@@ -177,6 +191,7 @@ A deadline is created once per build or session using a monotonic clock. Source 
 - `EventSink`
 - `MetricsSink`
 - `PolicyResolver`
+- `AuthorityPolicyResolver`
 - `ResiliencePolicyResolver`
 
 Transport and application adapters remain outside the core package.

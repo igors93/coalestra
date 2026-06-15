@@ -36,9 +36,10 @@ class CacheStats:
 
 
 class AsyncMemoryCache:
-    """Concurrency-safe in-memory LRU cache with isolated monotonic writes."""
+    """Concurrency-safe LRU cache with authority-aware isolated writes."""
 
     validates_dependency_versions = True
+    validates_source_authority = True
 
     def __init__(
         self,
@@ -217,7 +218,7 @@ class AsyncMemoryCache:
         selected: dict[ResourceKey, SnapshotValue[Any]] = {}
         for value in values:
             current = selected.get(value.key)
-            if current is None or value.observed_at >= current.observed_at:
+            if current is None or AsyncMemoryCache._candidate_precedes(current, value):
                 selected[value.key] = value
         return selected
 
@@ -231,11 +232,24 @@ class AsyncMemoryCache:
     ) -> CacheWriteStatus:
         if force or previous is None:
             return CacheWriteStatus.STORED
+        if value.authority_rank < previous.authority_rank:
+            return CacheWriteStatus.IGNORED_LOWER_AUTHORITY
+        if value.authority_rank > previous.authority_rank:
+            return CacheWriteStatus.STORED
         if value.observed_at < previous.observed_at:
             return CacheWriteStatus.IGNORED_OLDER
         if value.observed_at == previous.observed_at and not replace_equal:
             return CacheWriteStatus.IGNORED_DUPLICATE
         return CacheWriteStatus.STORED
+
+    @staticmethod
+    def _candidate_precedes(
+        current: SnapshotValue[Any],
+        candidate: SnapshotValue[Any],
+    ) -> bool:
+        if candidate.authority_rank != current.authority_rank:
+            return candidate.authority_rank > current.authority_rank
+        return candidate.observed_at >= current.observed_at
 
     async def invalidate(self, key: ResourceKey) -> None:
         await self.invalidate_many((key,))

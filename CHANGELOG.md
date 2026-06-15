@@ -6,6 +6,9 @@
 - Refreshed already-pinned derived dependents transitively when a dependency is revalidated.
 - Added optional source-forced revalidation while preserving newer cache and publication reads by default.
 - Preserved the previous session state when any affected resource fails revalidation.
+- Added explicit source-authority policies for cache and publication conflicts.
+- Added authority-aware cache outcomes while preserving timestamp ordering for equal-ranked sources.
+- Ensured concurrent authoritative publications supersede lower-authority in-flight source results.
 
 ## 0.5.3 - 2026-06-15
 

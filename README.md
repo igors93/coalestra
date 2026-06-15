@@ -147,6 +147,44 @@ builder = SnapshotBuilder(
 
 `AsyncMemoryCache` and standalone `ResourcePublisher` instances accept the same `payload_copier` option. Returning the original object from a custom copier is safe only when the payload is deeply immutable.
 
+## Source authority
+
+Source priority controls acquisition order. Source authority independently controls which revision
+may remain in the shared cache when local state, real-time events, and remote reads disagree.
+Higher ranks win even when their observation timestamp is older. Sources with the same rank retain
+the existing timestamp-monotonic behavior.
+
+```python
+from coalestra import SnapshotBuilder, SourceAuthorityPolicy
+
+authority = SourceAuthorityPolicy(
+    source_ranks={
+        "reconciled-local": 300,
+        "user-data-stream": 200,
+        "binance-rest": 100,
+    }
+)
+
+builder = SnapshotBuilder(
+    sources,
+    authority_policy=authority,
+)
+```
+
+A common alternative is to assign local reconciled state and real-time events the same rank so the
+newest of those two wins, while keeping REST at a lower rank. Resource-specific rules use
+`AuthorityPolicyResolver` with exact-key overrides or a dynamic resolver.
+
+`SnapshotValue.authority_rank` records the rank used for the cached revision. `force=True` remains an
+explicit administrative override and can replace a higher-authority value. Freshness is still
+independent: authority decides write precedence, while `FreshnessPolicy` decides whether a stored
+value is usable by a reader. If a higher-authority publication arrives while a lower-authority source
+call is in flight, the completed snapshot adopts the fresh authoritative cache winner.
+
+Custom caches used with configured authority rules must implement the same atomic comparison and
+declare `validates_source_authority = True`. Clear persistent caches after changing authority ranks,
+because existing entries retain the rank assigned when they were written.
+
 ## Snapshot diagnostics
 
 Every snapshot contains immutable acquisition diagnostics:
