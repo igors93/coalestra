@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from coalestra.core.diagnostics import DiagnosticsCollector
@@ -27,10 +29,18 @@ class SourceAttempt:
     error: Exception | None = None
     attempts: int = 1
     latency_ms: float = 0.0
+    dependency_versions: Mapping[ResourceKey, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (self.payload is None) == (self.error is None):
             raise ValueError("source attempt must contain exactly one of payload or error")
+        if self.error is not None and self.dependency_versions:
+            raise ValueError("failed source attempts cannot contain dependency versions")
+        object.__setattr__(
+            self,
+            "dependency_versions",
+            MappingProxyType(dict(self.dependency_versions)),
+        )
 
 
 @dataclass

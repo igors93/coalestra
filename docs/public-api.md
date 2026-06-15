@@ -159,6 +159,8 @@ submit_publish(...) -> concurrent.futures.Future[PublishResult]
 
 `FetchContext.snapshot_id` identifies the enclosing build or session.
 
+`SnapshotValue.version` is an opaque identity for one resolved resource revision. `SnapshotValue.dependency_versions` records the exact dependency revisions used to produce a derived value. Cache implementations use these fields to reject derived entries whose dependencies have changed.
+
 ## Cache
 
 - `AsyncMemoryCache`

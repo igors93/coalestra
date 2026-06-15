@@ -276,6 +276,7 @@ class SourceCalls:
         payload: SourcePayload[Any],
         attempts: int,
         latency_ms: float,
+        dependency_versions: Mapping[ResourceKey, str] | None = None,
     ) -> SnapshotValue[Any]:
         fetched_at = self.clock.now()
         future_seconds = self.validate_payload_timestamp(key, payload)
@@ -297,6 +298,7 @@ class SourceCalls:
             latency_ms=latency_ms,
             attempts=attempts,
             metadata=metadata,
+            dependency_versions=dependency_versions or {},
         )
 
     def coerce_payload(

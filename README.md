@@ -267,6 +267,8 @@ rules_source = CallableDerivedSource(
 
 Dependencies may themselves be cached, batched, fetched, or derived. Direct and indirect cycles are rejected.
 
+Every `SnapshotValue` carries an opaque resource version. Derived values record the versions used for each dependency. A cached derived value is accepted only while every recorded dependency version is still current. Publishing or caching a newer dependency therefore invalidates affected derived values lazily on their next read, including transitive derived chains.
+
 ## Global and per-source capacity
 
 `max_concurrency` is a builder-wide limit. Concurrent calls to `build()` and multiple active sessions share the same capacity.

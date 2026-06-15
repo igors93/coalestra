@@ -593,6 +593,7 @@ class SnapshotBuilder:
                         payload=payload,
                         attempts=attempt.attempts,
                         latency_ms=attempt.latency_ms,
+                        dependency_versions=attempt.dependency_versions,
                     )
                 except SourceProtocolError as error:
                     runtime.diagnostics.future_timestamp_rejections += 1

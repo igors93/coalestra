@@ -29,38 +29,6 @@ def make_value(key: ResourceKey, *, observed_at: float) -> SnapshotValue[int]:
     )
 
 
-def value(key: ResourceKey, observed_at: float) -> SnapshotValue[int]:
-    return SnapshotValue(
-        key=key,
-        value=1,
-        source="test",
-        observed_at=observed_at,
-        fetched_at=observed_at,
-        age_seconds=0.0,
-        stale=False,
-        from_cache=False,
-        latency_ms=0.0,
-    )
-
-
-def text_value(
-    key: ResourceKey,
-    payload: str,
-    observed_at: float,
-) -> SnapshotValue[str]:
-    return SnapshotValue(
-        key=key,
-        value=payload,
-        source="test",
-        observed_at=observed_at,
-        fetched_at=observed_at,
-        age_seconds=0.0,
-        stale=False,
-        from_cache=False,
-        latency_ms=0.0,
-    )
-
-
 def test_memory_cache_reports_fresh_and_stale_windows() -> None:
     async def scenario() -> None:
         cache = AsyncMemoryCache()
@@ -98,6 +66,38 @@ def test_memory_cache_evicts_least_recently_used_entry() -> None:
         assert (await cache.get(key_c, now=101.0, policy=policy)).value is not None
 
     asyncio.run(scenario())
+
+
+def value(key: ResourceKey, observed_at: float) -> SnapshotValue[int]:
+    return SnapshotValue(
+        key=key,
+        value=1,
+        source="test",
+        observed_at=observed_at,
+        fetched_at=observed_at,
+        age_seconds=0.0,
+        stale=False,
+        from_cache=False,
+        latency_ms=0.0,
+    )
+
+
+def text_value(
+    key: ResourceKey,
+    payload: str,
+    observed_at: float,
+) -> SnapshotValue[str]:
+    return SnapshotValue(
+        key=key,
+        value=payload,
+        source="test",
+        observed_at=observed_at,
+        fetched_at=observed_at,
+        age_seconds=0.0,
+        stale=False,
+        from_cache=False,
+        latency_ms=0.0,
+    )
 
 
 def test_batch_cache_operations_expiry_and_stats() -> None:
@@ -253,5 +253,56 @@ def test_builder_remains_compatible_with_single_key_custom_cache() -> None:
         assert first.diagnostics.cache_batch_reads == 0
         assert first.diagnostics.cache_batch_writes == 0
         assert second.diagnostics.cache_hits == 2
+
+    asyncio.run(scenario())
+
+
+def test_memory_cache_invalidates_derived_value_when_dependency_version_changes() -> None:
+    async def scenario() -> None:
+        cache = AsyncMemoryCache()
+        policy = FreshnessPolicy(1000.0, 1000.0)
+        dependency = SnapshotValue(
+            key=KEY_A,
+            value=2,
+            source="source",
+            observed_at=100.0,
+            fetched_at=100.0,
+            age_seconds=0.0,
+            stale=False,
+            from_cache=False,
+            latency_ms=0.0,
+        )
+        derived = SnapshotValue(
+            key=KEY_B,
+            value=4,
+            source="derived",
+            observed_at=100.0,
+            fetched_at=100.0,
+            age_seconds=0.0,
+            stale=False,
+            from_cache=False,
+            latency_ms=0.0,
+            dependency_versions={KEY_A: dependency.version},
+        )
+        await cache.set_many((dependency, derived))
+
+        initial = await cache.get(KEY_B, now=100.0, policy=policy)
+        assert initial.value is not None
+
+        replacement = SnapshotValue(
+            key=KEY_A,
+            value=3,
+            source="stream",
+            observed_at=101.0,
+            fetched_at=101.0,
+            age_seconds=0.0,
+            stale=False,
+            from_cache=False,
+            latency_ms=0.0,
+        )
+        await cache.set(replacement)
+
+        invalidated = await cache.get(KEY_B, now=101.0, policy=policy)
+        assert invalidated.value is None
 
     asyncio.run(scenario())

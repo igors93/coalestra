@@ -24,6 +24,10 @@ class CacheAccess:
         self.cache = cache
         self.clock = clock
         self.payload_isolator = payload_isolator
+        self._all_values_policy = FreshnessPolicy(
+            ttl_seconds=float("inf"),
+            max_stale_seconds=float("inf"),
+        )
 
     async def get_many(
         self,
@@ -45,7 +49,10 @@ class CacheAccess:
             )
             lookups = dict(zip(unique, completed, strict=True))
 
-        return {key: self._isolated_lookup(key, lookups[key]) for key in unique}
+        isolated = {key: self._isolated_lookup(key, lookups[key]) for key in unique}
+        if bool(getattr(self.cache, "validates_dependency_versions", False)):
+            return isolated
+        return await self._filter_invalid_dependencies(isolated, now=now)
 
     async def set_many(
         self,
@@ -88,6 +95,98 @@ class CacheAccess:
             latency_ms=0.0,
             metadata=metadata,
         )
+
+    async def _filter_invalid_dependencies(
+        self,
+        lookups: Mapping[ResourceKey, CacheLookup],
+        *,
+        now: float,
+    ) -> Mapping[ResourceKey, CacheLookup]:
+        cached_values: dict[ResourceKey, SnapshotValue[Any] | None] = {}
+        invalid: set[ResourceKey] = set()
+        filtered = dict(lookups)
+
+        for key, lookup in lookups.items():
+            value = lookup.value
+            if value is None or not value.dependency_versions:
+                continue
+            if not await self._dependencies_current(
+                value,
+                now=now,
+                cached_values=cached_values,
+                visiting=frozenset(),
+                invalid=invalid,
+            ):
+                invalid.add(key)
+                filtered[key] = CacheLookup(
+                    value=None,
+                    fresh=False,
+                    usable_stale=False,
+                    age_seconds=lookup.age_seconds,
+                )
+
+        if invalid:
+            await self._invalidate_many(invalid)
+        return filtered
+
+    async def _dependencies_current(
+        self,
+        value: SnapshotValue[Any],
+        *,
+        now: float,
+        cached_values: dict[ResourceKey, SnapshotValue[Any] | None],
+        visiting: frozenset[ResourceKey],
+        invalid: set[ResourceKey],
+    ) -> bool:
+        if not value.dependency_versions:
+            return True
+        if value.key in visiting:
+            invalid.add(value.key)
+            return False
+
+        path = visiting | {value.key}
+        for dependency_key, expected_version in value.dependency_versions.items():
+            dependency = await self._read_unfiltered(
+                dependency_key,
+                now=now,
+                cached_values=cached_values,
+            )
+            if dependency is None or dependency.version != expected_version:
+                return False
+            if not await self._dependencies_current(
+                dependency,
+                now=now,
+                cached_values=cached_values,
+                visiting=path,
+                invalid=invalid,
+            ):
+                invalid.add(dependency.key)
+                return False
+        return True
+
+    async def _read_unfiltered(
+        self,
+        key: ResourceKey,
+        *,
+        now: float,
+        cached_values: dict[ResourceKey, SnapshotValue[Any] | None],
+    ) -> SnapshotValue[Any] | None:
+        if key in cached_values:
+            return cached_values[key]
+        lookup = await self.cache.get(
+            key,
+            now=now,
+            policy=self._all_values_policy,
+        )
+        cached_values[key] = lookup.value
+        return lookup.value
+
+    async def _invalidate_many(self, keys: Collection[ResourceKey]) -> None:
+        unique = tuple(dict.fromkeys(keys))
+        if isinstance(self.cache, BatchAsyncCache):
+            await self.cache.invalidate_many(unique)
+            return
+        await asyncio.gather(*(self.cache.invalidate(key) for key in unique))
 
     def _isolated_lookup(
         self,

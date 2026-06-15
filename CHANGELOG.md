@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.3 - 2026-06-15
 
 - Added deep payload isolation across source, cache, publisher, single-flight, derived, session, and snapshot boundaries.
 - Added configurable `payload_copier` hooks for trusted immutable or specialized payload types.
 - Added structured `PayloadIsolationError` failures for payloads that cannot be copied safely.
 - Updated cache tests to require value equality without object-identity sharing.
+- Added version-aware derived cache invalidation, including transitive dependency chains and custom-cache fallback validation.
 
 ## 0.5.2 - 2026-06-14
 

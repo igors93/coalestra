@@ -38,6 +38,8 @@ class CacheStats:
 class AsyncMemoryCache:
     """Concurrency-safe in-memory LRU cache with isolated monotonic writes."""
 
+    validates_dependency_versions = True
+
     def __init__(
         self,
         *,
@@ -98,6 +100,17 @@ class AsyncMemoryCache:
 
                 age = max(0.0, now - value.observed_at)
                 policy = policies[key]
+                if not self._dependencies_current_locked(value, visiting=frozenset()):
+                    self._entries.pop(key, None)
+                    self._misses += 1
+                    self._invalidations += 1
+                    results[key] = CacheLookup(
+                        value=None,
+                        fresh=False,
+                        usable_stale=False,
+                        age_seconds=age,
+                    )
+                    continue
                 if age > policy.max_stale_seconds:
                     self._entries.pop(key, None)
                     self._misses += 1
@@ -319,6 +332,26 @@ class AsyncMemoryCache:
             value,
             context=f"{operation} for {value.key}",
         )
+
+    def _dependencies_current_locked(
+        self,
+        value: SnapshotValue[Any],
+        *,
+        visiting: frozenset[ResourceKey],
+    ) -> bool:
+        if not value.dependency_versions:
+            return True
+        if value.key in visiting:
+            return False
+
+        path = visiting | {value.key}
+        for dependency_key, expected_version in value.dependency_versions.items():
+            dependency = self._entries.get(dependency_key)
+            if dependency is None or dependency.version != expected_version:
+                return False
+            if not self._dependencies_current_locked(dependency, visiting=path):
+                return False
+        return True
 
     def _enforce_limit_locked(self) -> None:
         if self.max_entries is None:

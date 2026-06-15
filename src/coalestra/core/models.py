@@ -6,12 +6,17 @@ from enum import Enum
 from math import isfinite
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
+from uuid import uuid4
 
 from coalestra.core.diagnostics import SnapshotDiagnostics
 from coalestra.core.keys import ResourceKey as ResourceKey
 from coalestra.core.quality import require_finite_timestamp
 
 T = TypeVar("T")
+
+
+def _new_resource_version() -> str:
+    return uuid4().hex
 
 
 class RefreshMode(str, Enum):
@@ -131,6 +136,11 @@ class SnapshotValue(Generic[T]):
     latency_ms: float
     attempts: int = 1
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    version: str = field(default_factory=_new_resource_version, compare=False)
+    dependency_versions: Mapping[ResourceKey, str] = field(
+        default_factory=dict,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -143,7 +153,24 @@ class SnapshotValue(Generic[T]):
             "fetched_at",
             require_finite_timestamp(self.fetched_at, name="fetched_at"),
         )
+        normalized_version = str(self.version).strip()
+        if not normalized_version:
+            raise ValueError("version cannot be empty")
+        normalized_dependencies: dict[ResourceKey, str] = {}
+        for key, version in self.dependency_versions.items():
+            if not isinstance(key, ResourceKey):
+                raise TypeError("dependency_versions keys must be ResourceKey instances")
+            normalized_dependency_version = str(version).strip()
+            if not normalized_dependency_version:
+                raise ValueError(f"dependency version for {key} cannot be empty")
+            normalized_dependencies[key] = normalized_dependency_version
+        object.__setattr__(self, "version", normalized_version)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(
+            self,
+            "dependency_versions",
+            MappingProxyType(normalized_dependencies),
+        )
 
 
 @dataclass(frozen=True)

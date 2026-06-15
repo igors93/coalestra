@@ -247,3 +247,178 @@ def test_requested_resource_can_also_be_a_dependency_without_deadlock() -> None:
     assert snapshot.value(VALUE_A, int) == 6
     assert snapshot.value(CHAIN, int) == 7
     assert raw_calls == 1
+
+
+def test_derived_cache_recomputes_after_published_dependency_update() -> None:
+    derivations = 0
+
+    async def derive(_key, dependencies, _context):
+        nonlocal derivations
+        derivations += 1
+        return dependencies.value(RAW, int) * 2
+
+    async def scenario():
+        builder = SnapshotBuilder(
+            [
+                CallableDerivedSource(
+                    name="derived",
+                    priority=100,
+                    supports=lambda key: key == VALUE_A,
+                    dependencies=lambda _key: (RAW,),
+                    deriver=derive,
+                ),
+                CallableSource(
+                    name="raw",
+                    priority=1,
+                    supports=lambda key: key == RAW,
+                    fetcher=lambda _key, _context: 2,
+                ),
+            ],
+            default_policy=FreshnessPolicy(60.0, 60.0),
+        )
+        first = await builder.build([VALUE_A])
+        await builder.publisher.publish(
+            RAW,
+            5,
+            source="stream",
+            observed_at=first[RAW].observed_at + 1.0 if RAW in first else None,
+            force=True,
+        )
+        second = await builder.build([VALUE_A])
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first.value(VALUE_A, int) == 4
+    assert second.value(VALUE_A, int) == 10
+    assert second[VALUE_A].from_cache is False
+    assert derivations == 2
+
+
+def test_nested_derived_cache_recomputes_transitively() -> None:
+    value_derivations = 0
+    chain_derivations = 0
+
+    async def derive_value(_key, dependencies, _context):
+        nonlocal value_derivations
+        value_derivations += 1
+        return dependencies.value(RAW, int) * 2
+
+    async def derive_chain(_key, dependencies, _context):
+        nonlocal chain_derivations
+        chain_derivations += 1
+        return dependencies.value(VALUE_A, int) + 1
+
+    async def scenario():
+        builder = SnapshotBuilder(
+            [
+                CallableDerivedSource(
+                    name="chain",
+                    priority=200,
+                    supports=lambda key: key == CHAIN,
+                    dependencies=lambda _key: (VALUE_A,),
+                    deriver=derive_chain,
+                ),
+                CallableDerivedSource(
+                    name="value",
+                    priority=100,
+                    supports=lambda key: key == VALUE_A,
+                    dependencies=lambda _key: (RAW,),
+                    deriver=derive_value,
+                ),
+                CallableSource(
+                    name="raw",
+                    priority=1,
+                    supports=lambda key: key == RAW,
+                    fetcher=lambda _key, _context: 2,
+                ),
+            ],
+            default_policy=FreshnessPolicy(60.0, 60.0),
+        )
+        first = await builder.build([CHAIN])
+        await builder.publisher.publish(
+            RAW,
+            3,
+            source="stream",
+            observed_at=builder.clock.now() + 0.001,
+            force=True,
+        )
+        second = await builder.build([CHAIN])
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first.value(CHAIN, int) == 5
+    assert second.value(CHAIN, int) == 7
+    assert value_derivations == 2
+    assert chain_derivations == 2
+
+
+def test_custom_cache_uses_builder_dependency_version_validation() -> None:
+    from coalestra import CacheLookup, SnapshotValue
+
+    class PlainCache:
+        def __init__(self) -> None:
+            self.values: dict[ResourceKey, SnapshotValue[object]] = {}
+
+        async def get(self, key, *, now, policy):
+            value = self.values.get(key)
+            if value is None:
+                return CacheLookup(None, False, False)
+            age = max(0.0, now - value.observed_at)
+            return CacheLookup(
+                value,
+                age <= policy.ttl_seconds,
+                age <= policy.max_stale_seconds,
+                age,
+            )
+
+        async def set(self, value):
+            self.values[value.key] = value
+
+        async def invalidate(self, key):
+            self.values.pop(key, None)
+
+        async def clear(self):
+            self.values.clear()
+
+    derivations = 0
+
+    async def derive(_key, dependencies, _context):
+        nonlocal derivations
+        derivations += 1
+        return dependencies.value(RAW, int) * 2
+
+    async def scenario():
+        cache = PlainCache()
+        builder = SnapshotBuilder(
+            [
+                CallableDerivedSource(
+                    name="derived",
+                    priority=100,
+                    supports=lambda key: key == VALUE_A,
+                    dependencies=lambda _key: (RAW,),
+                    deriver=derive,
+                ),
+                CallableSource(
+                    name="raw",
+                    priority=1,
+                    supports=lambda key: key == RAW,
+                    fetcher=lambda _key, _context: 2,
+                ),
+            ],
+            cache=cache,
+            default_policy=FreshnessPolicy(60.0, 60.0),
+        )
+        first = await builder.build([VALUE_A])
+        await builder.publisher.publish(
+            RAW,
+            4,
+            source="stream",
+            force=True,
+        )
+        second = await builder.build([VALUE_A])
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first.value(VALUE_A, int) == 4
+    assert second.value(VALUE_A, int) == 8
+    assert derivations == 2

@@ -533,6 +533,10 @@ class SourceExecutor:
                     payload=payload,
                     attempts=attempts,
                     latency_ms=self.calls.elapsed_ms(started),
+                    dependency_versions={
+                        dependency_key: dependency_value.version
+                        for dependency_key, dependency_value in dependency_values.items()
+                    },
                 )
             except asyncio.CancelledError:
                 await self.calls.circuit_breaker.record_abandoned(
