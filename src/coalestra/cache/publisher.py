@@ -120,6 +120,26 @@ class ResourcePublisher:
             max_stale_seconds=float("inf"),
         )
 
+    def _prepare_update_for_submission(
+        self,
+        update: ResourceUpdate[T],
+    ) -> ResourceUpdate[T]:
+        """Capture one update before it crosses a non-blocking thread boundary."""
+
+        return ResourceUpdate(
+            key=update.key,
+            value=self._payload_isolator.copy(
+                update.value,
+                context=f"non-blocking submission payload for {update.key}",
+            ),
+            source=update.source,
+            observed_at=update.observed_at,
+            metadata=self._payload_isolator.copy_metadata(
+                update.metadata,
+                context=f"non-blocking submission metadata for {update.key}",
+            ),
+        )
+
     async def publish(
         self,
         key: ResourceKey,

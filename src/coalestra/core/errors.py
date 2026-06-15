@@ -50,6 +50,17 @@ class SnapshotDeadlineExceededError(SourceTimeoutError):
     """Raised when the overall snapshot deadline is exhausted."""
 
 
+class SubmissionBacklogFullError(CoalestraError):
+    """Raised when the synchronous non-blocking submission backlog is full."""
+
+    def __init__(self, *, limit: int, pending: int) -> None:
+        self.limit = int(limit)
+        self.pending = int(pending)
+        super().__init__(
+            f"Non-blocking submission backlog is full (pending={self.pending}, limit={self.limit})"
+        )
+
+
 class PayloadIsolationError(CoalestraError):
     """Raised when a payload cannot be safely copied across an isolation boundary."""
 

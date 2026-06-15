@@ -251,6 +251,22 @@ A `DiagnosticsCollector` belongs to one build/session runtime. It records explic
 
 Observation skew is the difference between the newest and oldest `observed_at` among resolved resources. It describes temporal consistency but does not enforce a domain threshold.
 
+## Synchronous submission backlog
+
+The synchronous facade schedules event publications and invalidations on one persistent event-loop thread. Non-blocking `submit_*` calls reserve a slot in a bounded, thread-safe backlog before scheduling work. A full backlog is rejected immediately instead of blocking the producer or accumulating unbounded futures.
+
+```text
+producer thread
+      |
+      | submit_*
+      v
+bounded submission backlog -> Coalestra event loop -> publisher/cache
+```
+
+Publication payloads and nested metadata are isolated on the producer thread before a backlog slot is scheduled. Bulk update and invalidation collections are also materialized at submission time. Accepted work therefore represents the state supplied by the producer at the call boundary, even when the original objects are mutated afterward.
+
+Completed futures release their backlog slots regardless of success, failure, or cancellation. `flush_submissions()` waits for the operations that were pending when the call began. During shutdown the facade atomically stops accepting submissions, drains accepted work up to the shutdown timeout, cancels any remainder, and only then closes the builder and event loop. Application errors are retained on the futures returned to producers and do not disappear during backlog accounting.
+
 ## Buffered observability model
 
 Buffered sinks preserve the synchronous `EventSink` and `MetricsSink` protocols while moving downstream delivery to a dedicated thread.

@@ -441,29 +441,41 @@ A session intentionally keeps values already pinned before a publication. New bu
 
 ## Synchronous applications
 
-`SyncSnapshotBuilder` owns one persistent event-loop thread. Keep it alive for the application lifetime.
+`SyncSnapshotBuilder` owns one persistent event-loop thread. Keep it alive for the application lifetime. Non-blocking publisher submissions use a bounded backlog so event-producing threads cannot create unbounded work.
 
 ```python
-from coalestra import SyncSnapshotBuilder
+from coalestra import ResourceUpdate, SyncSnapshotBuilder
 
-with SyncSnapshotBuilder(builder) as sync_builder:
+with SyncSnapshotBuilder(
+    builder,
+    max_pending_submissions=256,
+) as sync_builder:
+    # Blocking publication remains available for callers that need the result immediately.
     sync_builder.publisher.publish(
         PRICE,
         {"price": "65001.25"},
         source="market-stream",
     )
 
-    # Suitable for callbacks that should not block their producer thread.
-    future = sync_builder.publisher.submit_publish(
-        POSITION,
-        position,
-        source="user-stream",
-        observed_at=event_timestamp,
+    # Non-blocking operations return concurrent.futures.Future objects.
+    publication = sync_builder.publisher.submit_publish_many(
+        (
+            ResourceUpdate(POSITION, position, source="user-stream"),
+            ResourceUpdate(OPEN_ORDERS, orders, source="user-stream"),
+        )
+    )
+    invalidation = sync_builder.publisher.submit_invalidate(
+        ACCOUNT,
+        reason="stream-gap",
     )
 
-    snapshot = sync_builder.build([PRICE, POSITION])
-    future.result()
+    # Wait for operations accepted before this call when a synchronization point is required.
+    sync_builder.publisher.flush(timeout_seconds=1.0)
+    publication.result()
+    invalidation.result()
 ```
+
+The available non-blocking methods are `submit_publish()`, `submit_publish_update()`, `submit_publish_many()`, `submit_invalidate()`, and `submit_invalidate_many()`. Publication values, nested metadata, update collections, and invalidation-key collections are captured before the submission call returns, so later producer-side mutation cannot change accepted work. When the backlog is full, submission fails immediately with `SubmissionBacklogFullError`; the producer thread is never silently blocked. `pending_submissions` exposes the current backlog size. Closing the facade stops accepting new submissions, drains accepted work up to `shutdown_timeout_seconds`, then cancels any remaining submissions before stopping the event loop. Exceptions raised by asynchronous operations remain available from their returned futures.
 
 Synchronous fetchers and derivation functions run in worker threads by default. `run_sync_in_thread=False` is available only for guaranteed non-blocking local reads. Transport-level timeouts remain necessary because an already-running Python thread cannot be forcibly terminated. Closing the synchronous facade closes its underlying builder by default.
 

@@ -143,11 +143,18 @@ The special key `"__global__"` identifies global capacity in snapshots.
 
 ### `SyncResourcePublisher`
 
-Provides blocking equivalents plus:
+Provides blocking equivalents plus bounded non-blocking operations:
 
 ```python
 submit_publish(...) -> concurrent.futures.Future[PublishResult]
+submit_publish_update(...) -> concurrent.futures.Future[PublishResult]
+submit_publish_many(...) -> concurrent.futures.Future[Mapping[ResourceKey, PublishResult]]
+submit_invalidate(...) -> concurrent.futures.Future[None]
+submit_invalidate_many(...) -> concurrent.futures.Future[None]
+flush(timeout_seconds=None) -> None
 ```
+
+`SyncSnapshotBuilder(max_pending_submissions=1024)` bounds accepted non-blocking operations. `pending_submissions` and `max_pending_submissions` are exposed on both the builder and publisher facades. Publication payloads and nested metadata are isolated synchronously before scheduling, and bulk collections are materialized before the call returns. A full backlog raises `SubmissionBacklogFullError` immediately. `flush_submissions()` waits for operations accepted before the call. Shutdown stops accepting new submissions, drains accepted work up to the configured shutdown timeout, and cancels any remaining operations. Operation failures remain available through the returned futures.
 
 ### Publication models
 

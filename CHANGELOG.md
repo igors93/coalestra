@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added bounded non-blocking publication and invalidation submissions to the synchronous facade.
+- Added bulk submission, backlog inspection, explicit flush, deterministic shutdown draining, and call-time payload capture.
+- Added `SubmissionBacklogFullError` when a producer exceeds the configured backlog limit.
+
 ## 0.5.4 - 2026-06-15
 
 - Added transactional selective revalidation for pinned session resources.

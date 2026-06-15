@@ -69,6 +69,7 @@ from coalestra.core import (
     SourceQueueTimeoutError,
     SourceTimeoutError,
     SourceUnavailableError,
+    SubmissionBacklogFullError,
     deepcopy_payload,
 )
 from coalestra.observability import (
@@ -192,6 +193,7 @@ __all__ = [
     "SourceResiliencePolicy",
     "SourceTimeoutError",
     "SourceUnavailableError",
+    "SubmissionBacklogFullError",
     "SyncResourcePublisher",
     "SyncSnapshotBuilder",
     "SyncSnapshotSession",

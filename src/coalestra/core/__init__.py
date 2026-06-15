@@ -20,6 +20,7 @@ from coalestra.core.errors import (
     SourceQueueTimeoutError,
     SourceTimeoutError,
     SourceUnavailableError,
+    SubmissionBacklogFullError,
 )
 from coalestra.core.health import BuilderHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator, deepcopy_payload
@@ -121,6 +122,7 @@ __all__ = [
     "SourceQueueTimeoutError",
     "SourceTimeoutError",
     "SourceUnavailableError",
+    "SubmissionBacklogFullError",
     "SystemClock",
     "deepcopy_payload",
 ]
