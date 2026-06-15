@@ -17,7 +17,7 @@ from coalestra.core.errors import (
     SourceFailure,
     SourceProtocolError,
 )
-from coalestra.core.health import BuilderHealth
+from coalestra.core.health import BuilderHealth, OperationalHealthTracker
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
     CacheWriteStatus,
@@ -138,6 +138,7 @@ class SnapshotBuilder:
         self.max_pending_tasks = (
             self.max_concurrency if max_pending_tasks is None else int(max_pending_tasks)
         )
+        self._health_tracker = OperationalHealthTracker()
 
         self._source_catalog = SourceCatalog(
             source_list,
@@ -164,6 +165,7 @@ class SnapshotBuilder:
             clock=self.clock,
             payload_isolator=self._payload_isolator,
             max_pending_tasks=self.max_pending_tasks,
+            health_tracker=self._health_tracker,
         )
         self._source_calls = SourceCalls(
             clock=self.clock,
@@ -182,6 +184,7 @@ class SnapshotBuilder:
             resolve_many=self._resolve_many,
             max_concurrency=self.max_concurrency,
             max_pending_tasks=self.max_pending_tasks,
+            health_tracker=self._health_tracker,
         )
         self._refresh_manager = RefreshManager(
             clock=self.clock,
@@ -202,6 +205,7 @@ class SnapshotBuilder:
             payload_isolator=self._payload_isolator,
             authority_resolver=self.authority_resolver,
             max_pending_tasks=self.max_pending_tasks,
+            health_tracker=self._health_tracker,
         )
 
     @property
@@ -229,14 +233,23 @@ class SnapshotBuilder:
         stats = getattr(self.cache, "stats", None)
         if callable(stats):
             cache_stats = await stats()
+        capacity = await self.capacity.snapshot()
+        operational = self._health_tracker.snapshot()
         return BuilderHealth(
             closed=self._closed,
             background_refreshes=self._refresh_manager.count,
             singleflight_in_flight=await self.single_flight.in_flight(),
             source_support_cache_entries=self._source_catalog.support_cache_size,
-            capacity=await self.capacity.snapshot(),
+            capacity=capacity,
             cache=cache_stats,
             circuits=await self.circuit_breaker.snapshot(),
+            active_dispatch_workers=operational.active_dispatch_workers,
+            waiting_for_capacity=sum(snapshot.waiting for snapshot in capacity.values()),
+            queue_timeout_count=operational.queue_timeout_count,
+            source_timeout_count=operational.source_timeout_count,
+            deadline_exceeded_count=operational.deadline_exceeded_count,
+            revalidation_attempt_count=operational.revalidation_attempt_count,
+            revalidation_failure_count=operational.revalidation_failure_count,
         )
 
     async def wait_for_refreshes(self) -> None:

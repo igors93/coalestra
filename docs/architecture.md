@@ -252,6 +252,22 @@ A `DiagnosticsCollector` belongs to one build/session runtime. It records explic
 
 Observation skew is the difference between the newest and oldest `observed_at` among resolved resources. It describes temporal consistency but does not enforce a domain threshold.
 
+## Operational health aggregation
+
+One builder owns a low-cardinality operational tracker shared by source dispatch, custom-cache fallbacks, the event publisher, and session revalidation. `health_snapshot()` reads this tracker, the capacity controller, single-flight state, refresh state, cache statistics, and circuit snapshots without performing source I/O.
+
+Current-state fields include active bounded-dispatch workers and the aggregate number of tasks waiting for capacity. Cumulative fields count queue timeouts, source-call timeouts, exhausted snapshot deadlines, revalidation attempts, and revalidation failures since builder creation. The synchronous facade overlays its current pending-submission count and configured backlog limit.
+
+```text
+bounded dispatch workers ----+
+capacity limiters -----------+
+source timeout outcomes -----+--> BuilderHealth
+session revalidation --------+
+sync submission backlog -----+
+```
+
+The health model remains operational rather than prescriptive. Coalestra reports saturation and failures; the consuming application decides whether to alert, degrade, pause work, or continue. No resource subjects or qualifier values are added to health fields.
+
 ## Synchronous submission backlog
 
 The synchronous facade schedules event publications and invalidations on one persistent event-loop thread. Non-blocking `submit_*` calls reserve a slot in a bounded, thread-safe backlog before scheduling work. A full backlog is rejected immediately instead of blocking the producer or accumulating unbounded futures.

@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Awaitable, Callable, Collection
 from typing import TypeVar
 
+from coalestra.core.health import OperationalHealthTracker
+
 DispatchItem = TypeVar("DispatchItem")
 DispatchResult = TypeVar("DispatchResult")
 
@@ -13,6 +15,7 @@ async def run_bounded(
     operation: Callable[[DispatchItem], Awaitable[DispatchResult]],
     *,
     max_tasks: int,
+    health_tracker: OperationalHealthTracker | None = None,
 ) -> tuple[DispatchResult, ...]:
     """Run ordered asynchronous work through a fixed worker set.
 
@@ -36,10 +39,16 @@ async def run_bounded(
     async def worker() -> None:
         nonlocal next_index
 
-        while next_index < len(ordered):
-            index = next_index
-            next_index += 1
-            results[index] = await operation(ordered[index])
+        if health_tracker is not None:
+            health_tracker.dispatch_worker_started()
+        try:
+            while next_index < len(ordered):
+                index = next_index
+                next_index += 1
+                results[index] = await operation(ordered[index])
+        finally:
+            if health_tracker is not None:
+                health_tracker.dispatch_worker_finished()
 
     workers = tuple(asyncio.create_task(worker()) for _ in range(worker_count))
     try:

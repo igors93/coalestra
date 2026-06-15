@@ -11,6 +11,7 @@ from typing import Any, Generic, TypeVar, cast
 from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.authority import AuthorityPolicyResolver
 from coalestra.core.errors import SourceProtocolError
+from coalestra.core.health import OperationalHealthTracker
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
@@ -103,6 +104,7 @@ class ResourcePublisher:
         payload_isolator: PayloadIsolator | None = None,
         authority_resolver: AuthorityPolicyResolver | None = None,
         max_pending_tasks: int = _DEFAULT_MAX_PENDING_TASKS,
+        health_tracker: OperationalHealthTracker | None = None,
     ) -> None:
         if lock_stripes < 1:
             raise ValueError("lock_stripes must be at least 1")
@@ -117,6 +119,7 @@ class ResourcePublisher:
         self._payload_isolator = payload_isolator or PayloadIsolator(payload_copier)
         self.authority_resolver = authority_resolver or AuthorityPolicyResolver()
         self.max_pending_tasks = int(max_pending_tasks)
+        self.health_tracker = health_tracker
         if self.authority_resolver.has_rules and not bool(
             getattr(cache, "validates_source_authority", False)
         ):
@@ -317,6 +320,7 @@ class ResourcePublisher:
                     unique,
                     invalidate_one,
                     max_tasks=self.max_pending_tasks,
+                    health_tracker=self.health_tracker,
                 )
         for key in unique:
             self.metrics.increment(
@@ -347,6 +351,7 @@ class ResourcePublisher:
                 keys,
                 read_one,
                 max_tasks=self.max_pending_tasks,
+                health_tracker=self.health_tracker,
             )
             lookups = dict(zip(keys, completed, strict=True))
         existing: dict[ResourceKey, SnapshotValue[Any] | None] = {}
@@ -398,6 +403,7 @@ class ResourcePublisher:
                 isolated,
                 write_one,
                 max_tasks=self.max_pending_tasks,
+                health_tracker=self.health_tracker,
             )
             return MappingProxyType({result.value.key: result for result in completed})
         return None
@@ -423,6 +429,7 @@ class ResourcePublisher:
                 isolated,
                 write_one,
                 max_tasks=self.max_pending_tasks,
+                health_tracker=self.health_tracker,
             )
 
     def _publish_result_from_cache(self, result: CacheWriteResult) -> PublishResult:

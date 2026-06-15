@@ -413,7 +413,19 @@ Controls tolerance and rejection of source or published timestamps that are ahea
 
 ### `BuilderHealth`
 
-Returned by `await builder.health_snapshot()` and `sync_builder.health_snapshot()`. It includes builder state, refresh count, single-flight count, support-cache size, capacity state, cache statistics, and circuit snapshots.
+Returned by `await builder.health_snapshot()` and `sync_builder.health_snapshot()` without performing source I/O. Existing fields cover builder state, refreshes, single-flight work, support-cache size, capacity details, cache statistics, and circuits. Operational aggregate fields include:
+
+- `active_dispatch_workers`: workers currently executing or awaiting bounded source/cache/publisher work;
+- `waiting_for_capacity`: aggregate waiters across global and per-source limiters;
+- `queue_timeout_count`: cumulative capacity-queue timeout outcomes;
+- `source_timeout_count`: cumulative source or transport timeout outcomes;
+- `deadline_exceeded_count`: cumulative snapshot-deadline exhaustion outcomes;
+- `revalidation_attempt_count`: cumulative transactional session revalidations;
+- `revalidation_failure_count`: revalidations that retained the previous session state;
+- `pending_submissions`: accepted non-blocking synchronous submissions not yet complete;
+- `max_pending_submissions`: synchronous backlog limit, or `None` on the asynchronous builder.
+
+Current-state fields are point-in-time observations. Counter fields are process-local and cumulative since builder creation. `SyncSnapshotBuilder.health_snapshot()` overlays its thread-safe submission backlog state onto the underlying builder health snapshot.
 
 ### Adapter options
 

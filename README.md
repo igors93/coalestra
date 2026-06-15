@@ -507,6 +507,23 @@ The available non-blocking methods are `submit_publish()`, `submit_publish_updat
 
 Synchronous fetchers and derivation functions run in worker threads by default. `run_sync_in_thread=False` is available only for guaranteed non-blocking local reads. Transport-level timeouts remain necessary because an already-running Python thread cannot be forcibly terminated. Closing the synchronous facade closes its underlying builder by default.
 
+## Operational health
+
+`await builder.health_snapshot()` returns an immutable, aggregated view without calling any source. In addition to cache, circuit, refresh, capacity, and single-flight state, it reports current dispatch workers and capacity waiters plus cumulative timeout and session-revalidation counters.
+
+```python
+health = await builder.health_snapshot()
+
+print(health.active_dispatch_workers)
+print(health.waiting_for_capacity)
+print(health.queue_timeout_count)
+print(health.source_timeout_count)
+print(health.deadline_exceeded_count)
+print(health.revalidation_failure_count)
+```
+
+`sync_builder.health_snapshot()` adds `pending_submissions` and `max_pending_submissions` from the synchronous non-blocking publication backlog. Counters are process-local and cumulative since builder creation. The snapshot intentionally exposes aggregates only; it does not include symbols, subjects, qualifiers, or business decisions.
+
 ## Architectural boundary
 
 Coalestra owns read acquisition, cache publication, freshness, coalescing, fallback, derivation, and read concurrency. The consuming application owns business decisions, authorization, risk, writes, transactions, and domain validation.

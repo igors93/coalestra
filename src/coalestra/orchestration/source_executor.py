@@ -13,8 +13,10 @@ from coalestra.core.errors import (
     SnapshotDeadlineExceededError,
     SourceProtocolError,
     SourceQueueTimeoutError,
+    SourceTimeoutError,
     SourceUnavailableError,
 )
+from coalestra.core.health import OperationalHealthTracker
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue
 from coalestra.core.protocols import BatchSnapshotSource, DerivedSource, SnapshotSource, Source
 from coalestra.orchestration.runtime import ResolutionRuntime, SourceAttempt
@@ -46,12 +48,14 @@ class SourceExecutor:
         resolve_many: ResolveMany,
         max_concurrency: int,
         max_pending_tasks: int,
+        health_tracker: OperationalHealthTracker,
     ) -> None:
         self.source_catalog = source_catalog
         self.calls = source_calls
         self.resolve_many = resolve_many
         self.max_concurrency = max_concurrency
         self.max_pending_tasks = max_pending_tasks
+        self.health_tracker = health_tracker
 
     async def attempt(
         self,
@@ -101,22 +105,26 @@ class SourceExecutor:
                     source_limit or self.max_concurrency,
                 ),
             )
-            merged: dict[ResourceKey, SourceAttempt] = {}
-            for start in range(0, len(chunks), wave_size):
-                wave = chunks[start : start + wave_size]
-                completed = await asyncio.gather(
-                    *(
-                        self._attempt_batch_source(
-                            batch_source,
-                            chunk,
-                            context=context,
-                            runtime=runtime,
-                        )
-                        for chunk in wave
-                    )
+
+            async def attempt_chunk(
+                chunk: tuple[ResourceKey, ...],
+            ) -> dict[ResourceKey, SourceAttempt]:
+                return await self._attempt_batch_source(
+                    batch_source,
+                    chunk,
+                    context=context,
+                    runtime=runtime,
                 )
-                for result in completed:
-                    merged.update(result)
+
+            completed = await run_bounded(
+                chunks,
+                attempt_chunk,
+                max_tasks=wave_size,
+                health_tracker=self.health_tracker,
+            )
+            merged: dict[ResourceKey, SourceAttempt] = {}
+            for result in completed:
+                merged.update(result)
             return merged
 
         return await self._attempt_single_source(
@@ -180,6 +188,10 @@ class SourceExecutor:
                 SnapshotDeadlineExceededError,
                 SourceQueueTimeoutError,
             ) as error:
+                if isinstance(error, SnapshotDeadlineExceededError):
+                    self.health_tracker.record_deadline_exceeded()
+                else:
+                    self.health_tracker.record_queue_timeout()
                 await self.calls.circuit_breaker.record_skipped(
                     source.name,
                     key=key,
@@ -202,6 +214,8 @@ class SourceExecutor:
                     latency_ms=self.calls.elapsed_ms(started),
                 )
             except Exception as error:
+                if isinstance(error, (SourceTimeoutError, TimeoutError)):
+                    self.health_tracker.record_source_timeout()
                 await self.calls.circuit_breaker.record_failure(
                     source.name,
                     key=key,
@@ -225,6 +239,7 @@ class SourceExecutor:
             keys,
             fetch_one,
             max_tasks=self.max_pending_tasks,
+            health_tracker=self.health_tracker,
         )
         for _key, attempt in completed:
             runtime.diagnostics.record_source_latency(
@@ -383,6 +398,10 @@ class SourceExecutor:
             SnapshotDeadlineExceededError,
             SourceQueueTimeoutError,
         ) as error:
+            if isinstance(error, SnapshotDeadlineExceededError):
+                self.health_tracker.record_deadline_exceeded()
+            else:
+                self.health_tracker.record_queue_timeout()
             for representative, _grouped_keys in active_groups:
                 await self.calls.circuit_breaker.record_skipped(
                     source.name,
@@ -422,6 +441,8 @@ class SourceExecutor:
                 )
             return results
         except Exception as error:
+            if isinstance(error, (SourceTimeoutError, TimeoutError)):
+                self.health_tracker.record_source_timeout()
             for representative, _grouped_keys in active_groups:
                 await self.calls.circuit_breaker.record_failure(
                     source.name,
@@ -557,6 +578,10 @@ class SourceExecutor:
                 SnapshotDeadlineExceededError,
                 SourceQueueTimeoutError,
             ) as error:
+                if isinstance(error, SnapshotDeadlineExceededError):
+                    self.health_tracker.record_deadline_exceeded()
+                else:
+                    self.health_tracker.record_queue_timeout()
                 await self.calls.circuit_breaker.record_skipped(
                     source.name,
                     key=key,
@@ -606,6 +631,8 @@ class SourceExecutor:
                     latency_ms=self.calls.elapsed_ms(started),
                 )
             except Exception as error:
+                if isinstance(error, (SourceTimeoutError, TimeoutError)):
+                    self.health_tracker.record_source_timeout()
                 await self.calls.circuit_breaker.record_failure(
                     source.name,
                     key=key,
@@ -629,6 +656,7 @@ class SourceExecutor:
             keys,
             derive_one,
             max_tasks=self.max_pending_tasks,
+            health_tracker=self.health_tracker,
         )
         for _key, attempt in completed:
             runtime.diagnostics.record_source_latency(

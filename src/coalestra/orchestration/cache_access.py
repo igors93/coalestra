@@ -6,6 +6,7 @@ from typing import Any
 
 from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.diagnostics import DiagnosticsCollector
+from coalestra.core.health import OperationalHealthTracker
 from coalestra.core.isolation import PayloadIsolator
 from coalestra.core.models import (
     CacheLookup,
@@ -33,6 +34,7 @@ class CacheAccess:
         clock: Clock,
         payload_isolator: PayloadIsolator,
         max_pending_tasks: int,
+        health_tracker: OperationalHealthTracker | None = None,
     ) -> None:
         self.cache = cache
         self.clock = clock
@@ -40,6 +42,7 @@ class CacheAccess:
             raise ValueError("max_pending_tasks must be at least 1")
         self.payload_isolator = payload_isolator
         self.max_pending_tasks = int(max_pending_tasks)
+        self.health_tracker = health_tracker
         self._all_values_policy = FreshnessPolicy(
             ttl_seconds=float("inf"),
             max_stale_seconds=float("inf"),
@@ -68,6 +71,7 @@ class CacheAccess:
                 unique,
                 read_one,
                 max_tasks=self.max_pending_tasks,
+                health_tracker=self.health_tracker,
             )
             lookups = dict(zip(unique, completed, strict=True))
 
@@ -109,6 +113,7 @@ class CacheAccess:
                 isolated,
                 write_atomic,
                 max_tasks=self.max_pending_tasks,
+                health_tracker=self.health_tracker,
             )
             return {v.key: r for v, r in zip(isolated, write_results, strict=True)}
 
@@ -119,6 +124,7 @@ class CacheAccess:
             isolated,
             write_one,
             max_tasks=self.max_pending_tasks,
+            health_tracker=self.health_tracker,
         )
         return None
 
@@ -240,6 +246,7 @@ class CacheAccess:
             unique,
             invalidate_one,
             max_tasks=self.max_pending_tasks,
+            health_tracker=self.health_tracker,
         )
 
     def _isolated_lookup(

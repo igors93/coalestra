@@ -290,6 +290,7 @@ class SnapshotSession:
         force_refresh: bool,
     ) -> None:
         status = "success" if committed else "error"
+        self._builder._health_tracker.record_revalidation(failed=not committed)
         self._builder.metrics.increment(
             "snapshot_session_revalidate_total",
             status=status,

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Replaced full resource-key metric labels with bounded `resource_namespace` and `resource_name` labels while preserving full resource identity in structured events.
+- Expanded `BuilderHealth` with aggregated dispatch, capacity-wait, timeout, revalidation, and synchronous submission-backlog state.
 
 ## 0.5.5 - 2026-06-15
 

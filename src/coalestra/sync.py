@@ -4,6 +4,7 @@ import asyncio
 import threading
 from collections.abc import Collection, Coroutine, Iterable, Mapping
 from concurrent.futures import Future, wait
+from dataclasses import replace
 from typing import Any, TypeVar
 
 from coalestra.cache.publisher import PublishResult, ResourcePublisher, ResourceUpdate
@@ -379,7 +380,14 @@ class SyncSnapshotBuilder:
 
     def health_snapshot(self) -> BuilderHealth:
         self._ensure_open()
-        return self._submit(self.builder.health_snapshot())
+        health = self._submit(self.builder.health_snapshot())
+        with self._submission_condition:
+            pending_submissions = len(self._pending_submissions)
+        return replace(
+            health,
+            pending_submissions=pending_submissions,
+            max_pending_submissions=self._max_pending_submissions,
+        )
 
     def session(
         self,
