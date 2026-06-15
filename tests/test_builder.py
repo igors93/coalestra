@@ -95,7 +95,7 @@ def test_stale_cache_is_used_when_sources_fail() -> None:
     async def fetch(_key, _context):
         if should_fail:
             raise SourceUnavailableError("temporary outage")
-        return SourcePayload(value=100, observed_at=time.time())
+        return SourcePayload(value=100, observed_at=time.time() - 1.0)
 
     builder = SnapshotBuilder(
         [

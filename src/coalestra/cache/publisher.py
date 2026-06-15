@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
 from coalestra.core.errors import SourceProtocolError
+from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheWriteResult,
@@ -91,6 +92,8 @@ class ResourcePublisher:
         events: EventSink,
         observation_policy: ObservationPolicy | None = None,
         lock_stripes: int = 64,
+        payload_copier: PayloadCopier | None = None,
+        payload_isolator: PayloadIsolator | None = None,
     ) -> None:
         if lock_stripes < 1:
             raise ValueError("lock_stripes must be at least 1")
@@ -100,6 +103,7 @@ class ResourcePublisher:
         self.metrics = metrics
         self.events = events
         self.observation_policy = observation_policy or ObservationPolicy()
+        self._payload_isolator = payload_isolator or PayloadIsolator(payload_copier)
         self._locks = tuple(asyncio.Lock() for _ in range(lock_stripes))
         self._all_values_policy = FreshnessPolicy(
             ttl_seconds=float("inf"),
@@ -182,7 +186,10 @@ class ResourcePublisher:
                     published_metadata["clock_skew_seconds"] = future_seconds
                 candidate = SnapshotValue(
                     key=key,
-                    value=update.value,
+                    value=self._payload_isolator.copy(
+                        update.value,
+                        context=f"published payload for {key}",
+                    ),
                     source=update.source,
                     observed_at=observed_at,
                     fetched_at=now,
@@ -191,7 +198,10 @@ class ResourcePublisher:
                     from_cache=False,
                     latency_ms=0.0,
                     attempts=0,
-                    metadata=published_metadata,
+                    metadata=self._payload_isolator.copy_metadata(
+                        published_metadata,
+                        context=f"published metadata for {key}",
+                    ),
                 )
                 candidates.append(candidate)
 
@@ -276,7 +286,18 @@ class ResourcePublisher:
                 *(self.cache.get(key, now=now, policy=self._all_values_policy) for key in keys)
             )
             lookups = dict(zip(keys, completed, strict=True))
-        return {key: lookups[key].value for key in keys}
+        existing: dict[ResourceKey, SnapshotValue[Any] | None] = {}
+        for key in keys:
+            value = lookups[key].value
+            existing[key] = (
+                None
+                if value is None
+                else self._payload_isolator.clone_snapshot_value(
+                    value,
+                    context=f"publisher cache read for {key}",
+                )
+            )
+        return existing
 
     async def _set_many_if_newer(
         self,
@@ -287,9 +308,16 @@ class ResourcePublisher:
     ) -> Mapping[ResourceKey, CacheWriteResult] | None:
         if not values:
             return MappingProxyType({})
+        isolated = tuple(
+            self._payload_isolator.clone_snapshot_value(
+                value,
+                context=f"publisher cache write for {value.key}",
+            )
+            for value in values
+        )
         if isinstance(self.cache, BatchAtomicAsyncCache):
             return await self.cache.set_many_if_newer(
-                values,
+                isolated,
                 force=force,
                 replace_equal=replace_equal,
             )
@@ -301,7 +329,7 @@ class ResourcePublisher:
                         force=force,
                         replace_equal=replace_equal,
                     )
-                    for value in values
+                    for value in isolated
                 )
             )
             return MappingProxyType({result.value.key: result for result in completed})
@@ -310,13 +338,19 @@ class ResourcePublisher:
     async def _set_many_legacy(self, values: Collection[SnapshotValue[Any]]) -> None:
         if not values:
             return
+        isolated = tuple(
+            self._payload_isolator.clone_snapshot_value(
+                value,
+                context=f"publisher legacy cache write for {value.key}",
+            )
+            for value in values
+        )
         if isinstance(self.cache, BatchAsyncCache):
-            await self.cache.set_many(values)
+            await self.cache.set_many(isolated)
         else:
-            await asyncio.gather(*(self.cache.set(value) for value in values))
+            await asyncio.gather(*(self.cache.set(value) for value in isolated))
 
-    @staticmethod
-    def _publish_result_from_cache(result: CacheWriteResult) -> PublishResult:
+    def _publish_result_from_cache(self, result: CacheWriteResult) -> PublishResult:
         statuses = {
             CacheWriteStatus.STORED: PublishStatus.PUBLISHED,
             CacheWriteStatus.IGNORED_OLDER: PublishStatus.IGNORED_OLDER,
@@ -324,8 +358,18 @@ class ResourcePublisher:
         }
         return PublishResult(
             status=statuses[result.status],
-            value=result.value,
-            previous=result.previous,
+            value=self._payload_isolator.clone_snapshot_value(
+                result.value,
+                context=f"publisher result for {result.value.key}",
+            ),
+            previous=(
+                None
+                if result.previous is None
+                else self._payload_isolator.clone_snapshot_value(
+                    result.previous,
+                    context=f"publisher previous result for {result.previous.key}",
+                )
+            ),
         )
 
     def _validate_observed_at(

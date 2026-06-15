@@ -487,10 +487,17 @@ class SourceExecutor:
                         errors=dependency_errors,
                     )
 
+                isolated_dependencies = {
+                    dependency_key: self.calls.payload_isolator.clone_snapshot_value(
+                        dependency_value,
+                        context=f"derived dependency for {dependency_key}",
+                    )
+                    for dependency_key, dependency_value in dependency_values.items()
+                }
                 dependency_snapshot = Snapshot(
                     snapshot_id=context.snapshot_id,
                     created_at=context.requested_at,
-                    resources=dependency_values,
+                    resources=isolated_dependencies,
                     errors={},
                 )
                 await self.calls.circuit_breaker.before_call(

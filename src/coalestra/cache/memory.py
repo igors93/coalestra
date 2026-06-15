@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheLookup,
@@ -35,12 +36,18 @@ class CacheStats:
 
 
 class AsyncMemoryCache:
-    """Concurrency-safe in-memory LRU cache with atomic monotonic writes."""
+    """Concurrency-safe in-memory LRU cache with isolated monotonic writes."""
 
-    def __init__(self, *, max_entries: int | None = 10_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_entries: int | None = 10_000,
+        payload_copier: PayloadCopier | None = None,
+    ) -> None:
         if max_entries is not None and max_entries < 1:
             raise ValueError("max_entries must be at least 1 or None")
         self.max_entries = max_entries
+        self._payload_isolator = PayloadIsolator(payload_copier)
         self._entries: OrderedDict[ResourceKey, SnapshotValue[Any]] = OrderedDict()
         self._lock = asyncio.Lock()
         self._hits = 0
@@ -111,7 +118,7 @@ class AsyncMemoryCache:
                 else:
                     self._stale_hits += 1
                 results[key] = CacheLookup(
-                    value=value,
+                    value=self._clone_for_caller(value, operation="cache read"),
                     fresh=fresh,
                     usable_stale=True,
                     age_seconds=age,
@@ -151,28 +158,39 @@ class AsyncMemoryCache:
 
         results: dict[ResourceKey, CacheWriteResult] = {}
         async with self._lock:
-            for value in candidates.values():
-                previous = self._entries.get(value.key)
+            for candidate in candidates.values():
+                previous = self._entries.get(candidate.key)
                 status = self._write_status(
                     previous,
-                    value,
+                    candidate,
                     force=force,
                     replace_equal=replace_equal,
                 )
 
                 if status is CacheWriteStatus.STORED:
-                    self._entries[value.key] = value
-                    self._entries.move_to_end(value.key)
+                    stored = self._payload_isolator.clone_snapshot_value(
+                        candidate,
+                        context=f"cache storage for {candidate.key}",
+                    )
+                    self._entries[candidate.key] = stored
+                    self._entries.move_to_end(candidate.key)
                     self._sets += 1
-                    current = value
+                    current = stored
                 else:
                     assert previous is not None
                     current = previous
 
-                results[value.key] = CacheWriteResult(
+                results[candidate.key] = CacheWriteResult(
                     status=status,
-                    value=current,
-                    previous=previous,
+                    value=self._clone_for_caller(current, operation="cache write result"),
+                    previous=(
+                        None
+                        if previous is None
+                        else self._clone_for_caller(
+                            previous,
+                            operation="cache previous value",
+                        )
+                    ),
                 )
 
             self._enforce_limit_locked()
@@ -290,6 +308,17 @@ class AsyncMemoryCache:
                 evictions=self._evictions,
                 expirations=self._expirations,
             )
+
+    def _clone_for_caller(
+        self,
+        value: SnapshotValue[Any],
+        *,
+        operation: str,
+    ) -> SnapshotValue[Any]:
+        return self._payload_isolator.clone_snapshot_value(
+            value,
+            context=f"{operation} for {value.key}",
+        )
 
     def _enforce_limit_locked(self) -> None:
         if self.max_entries is None:

@@ -43,6 +43,9 @@ from coalestra.core import (
     FreshnessPolicyProvider,
     KeyNormalizer,
     ObservationPolicy,
+    PayloadCopier,
+    PayloadIsolationError,
+    PayloadIsolator,
     RefreshMode,
     ResilienceConfiguredSource,
     ResourceKey,
@@ -61,6 +64,7 @@ from coalestra.core import (
     SourceQueueTimeoutError,
     SourceTimeoutError,
     SourceUnavailableError,
+    deepcopy_payload,
 )
 from coalestra.observability import (
     BufferedEventSink,
@@ -147,6 +151,9 @@ __all__ = [
     "NullEventSink",
     "NullMetrics",
     "ObservationPolicy",
+    "PayloadCopier",
+    "PayloadIsolationError",
+    "PayloadIsolator",
     "PolicyResolver",
     "PublishResult",
     "PublishStatus",
@@ -179,4 +186,5 @@ __all__ = [
     "SyncSnapshotBuilder",
     "SyncSnapshotSession",
     "__version__",
+    "deepcopy_payload",
 ]

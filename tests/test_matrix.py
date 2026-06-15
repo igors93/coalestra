@@ -148,7 +148,8 @@ def test_memory_cache_freshness_matrix(age: float, policy: FreshnessPolicy) -> N
             assert lookup.fresh is False
             assert lookup.usable_stale is False
         else:
-            assert lookup.value is value
+            assert lookup.value == value
+            assert lookup.value is not value
             assert lookup.fresh is (age <= policy.ttl_seconds)
             assert lookup.usable_stale is True
 

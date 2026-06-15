@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added deep payload isolation across source, cache, publisher, single-flight, derived, session, and snapshot boundaries.
+- Added configurable `payload_copier` hooks for trusted immutable or specialized payload types.
+- Added structured `PayloadIsolationError` failures for payloads that cannot be copied safely.
+- Updated cache tests to require value equality without object-identity sharing.
+
 ## 0.5.2 - 2026-06-14
 
 - Added atomic and monotonic cache writes.

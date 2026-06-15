@@ -139,10 +139,17 @@ class SnapshotSession:
             failed_resources=len(self._errors),
             observed_at_values=tuple(value.observed_at for value in self._resources.values()),
         )
+        resources = {
+            key: self._builder._payload_isolator.clone_snapshot_value(
+                value,
+                context=f"snapshot delivery for {key}",
+            )
+            for key, value in self._resources.items()
+        }
         return Snapshot(
             snapshot_id=self.snapshot_id,
             created_at=self.created_at,
-            resources=self._resources,
+            resources=resources,
             errors=self._errors,
             diagnostics=diagnostics,
         )

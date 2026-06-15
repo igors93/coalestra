@@ -5,6 +5,7 @@ from coalestra.core.errors import (
     CoalestraError,
     DependencyCycleError,
     DependencyResolutionError,
+    PayloadIsolationError,
     ResourceResolutionError,
     SessionClosedError,
     SnapshotBuildError,
@@ -16,6 +17,7 @@ from coalestra.core.errors import (
     SourceUnavailableError,
 )
 from coalestra.core.health import BuilderHealth
+from coalestra.core.isolation import PayloadCopier, PayloadIsolator, deepcopy_payload
 from coalestra.core.keys import (
     CASE_INSENSITIVE_KEY_NORMALIZER,
     LEGACY_KEY_NORMALIZER,
@@ -84,6 +86,9 @@ __all__ = [
     "KeyNormalizer",
     "MetricsSink",
     "ObservationPolicy",
+    "PayloadCopier",
+    "PayloadIsolationError",
+    "PayloadIsolator",
     "RefreshMode",
     "ResilienceConfiguredSource",
     "ResourceKey",
@@ -105,4 +110,5 @@ __all__ = [
     "SourceTimeoutError",
     "SourceUnavailableError",
     "SystemClock",
+    "deepcopy_payload",
 ]

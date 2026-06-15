@@ -50,6 +50,17 @@ class SnapshotDeadlineExceededError(SourceTimeoutError):
     """Raised when the overall snapshot deadline is exhausted."""
 
 
+class PayloadIsolationError(CoalestraError):
+    """Raised when a payload cannot be safely copied across an isolation boundary."""
+
+    def __init__(self, *, context: str, value_type: str) -> None:
+        self.context = context
+        self.value_type = value_type
+        super().__init__(
+            f"Unable to isolate {context}; payload type {value_type} does not support copying"
+        )
+
+
 class SourceProtocolError(CoalestraError):
     """Raised when a source violates one of Coalestra's source contracts."""
 

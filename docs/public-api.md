@@ -332,6 +332,10 @@ Implements `MetricsSink` and exposes the same lifecycle methods.
 
 Declares required and optional keys. Use with `SnapshotBuilder.build_request`, `SnapshotSession.resolve_request`, `SyncSnapshotBuilder.build_request`, or `SyncSnapshotSession.resolve_request`.
 
+### Payload isolation
+
+`SnapshotBuilder`, `AsyncMemoryCache`, and `ResourcePublisher` accept an optional `payload_copier`. The default uses `copy.deepcopy` and isolates values plus nested metadata at source, cache, publication, derived-dependency, single-flight, session, and snapshot-delivery boundaries. Copy failures raise `PayloadIsolationError`. Custom copiers should return a deeply independent value unless the payload is already deeply immutable.
+
 ### `ObservationPolicy`
 
 Controls tolerance and rejection of source or published timestamps that are ahead of the local clock.

@@ -17,6 +17,7 @@ from coalestra.core.errors import (
     SourceProtocolError,
 )
 from coalestra.core.health import BuilderHealth
+from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
     FetchContext,
     FreshnessPolicy,
@@ -86,6 +87,7 @@ class SnapshotBuilder:
         cache_source_support: bool = True,
         source_support_cache_max_entries: int | None = 100_000,
         manage_lifecycle: bool = False,
+        payload_copier: PayloadCopier | None = None,
     ) -> None:
         source_list = list(sources)
         if not source_list:
@@ -101,7 +103,8 @@ class SnapshotBuilder:
             max_stale_seconds=10.0,
         )
         self.policy_resolver = policy_resolver or PolicyResolver(default)
-        self.cache = cache or AsyncMemoryCache()
+        self._payload_isolator = PayloadIsolator(payload_copier)
+        self.cache = cache or AsyncMemoryCache(payload_copier=payload_copier)
         self.single_flight = single_flight or SingleFlight()
         self.retry_policy = retry_policy or RetryPolicy()
         self.circuit_breaker = circuit_breaker or CircuitBreaker(clock=self.clock)
@@ -141,7 +144,11 @@ class SnapshotBuilder:
             if self.capacity.limit_for(source.name) is None:
                 self.capacity.register_source(source.name, declared_limit)
 
-        self._cache_access = CacheAccess(cache=self.cache, clock=self.clock)
+        self._cache_access = CacheAccess(
+            cache=self.cache,
+            clock=self.clock,
+            payload_isolator=self._payload_isolator,
+        )
         self._source_calls = SourceCalls(
             clock=self.clock,
             capacity=self.capacity,
@@ -150,6 +157,7 @@ class SnapshotBuilder:
             metrics=self.metrics,
             events=self.events,
             observation_policy=self.observation_policy,
+            payload_isolator=self._payload_isolator,
         )
         self._source_executor = SourceExecutor(
             source_catalog=self._source_catalog,
@@ -173,6 +181,7 @@ class SnapshotBuilder:
             metrics=self.metrics,
             events=self.events,
             observation_policy=self.observation_policy,
+            payload_isolator=self._payload_isolator,
         )
 
     @property

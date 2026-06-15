@@ -15,6 +15,7 @@ from coalestra.core.errors import (
     SourceTimeoutError,
     SourceUnavailableError,
 )
+from coalestra.core.isolation import PayloadIsolator
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue, SourcePayload
 from coalestra.core.protocols import (
     BatchSnapshotSource,
@@ -58,6 +59,7 @@ class SourceCalls:
         metrics: MetricsSink,
         events: EventSink,
         observation_policy: ObservationPolicy,
+        payload_isolator: PayloadIsolator,
     ) -> None:
         self.clock = clock
         self.capacity = capacity
@@ -66,6 +68,7 @@ class SourceCalls:
         self.metrics = metrics
         self.events = events
         self.observation_policy = observation_policy
+        self.payload_isolator = payload_isolator
 
     async def fetch_once(
         self,
@@ -87,7 +90,10 @@ class SourceCalls:
                 lambda: source.fetch(key, context),
                 resource=key,
             )
-            return self.coerce_payload(result)
+            return self.coerce_payload(
+                result,
+                context=f"source {source.name} payload for {key}",
+            )
         finally:
             lease.release()
 
@@ -124,7 +130,13 @@ class SourceCalls:
                     f"batch source {source.name} returned unrequested resources: {rendered}"
                 )
 
-            return {key: self.coerce_payload(value) for key, value in result.items()}
+            return {
+                key: self.coerce_payload(
+                    value,
+                    context=f"batch source {source.name} payload for {key}",
+                )
+                for key, value in result.items()
+            }
         finally:
             lease.release()
 
@@ -149,7 +161,10 @@ class SourceCalls:
                 lambda: source.derive(key, dependencies, context),
                 resource=key,
             )
-            return self.coerce_payload(result)
+            return self.coerce_payload(
+                result,
+                context=f"derived source {source.name} payload for {key}",
+            )
         finally:
             lease.release()
 
@@ -284,9 +299,24 @@ class SourceCalls:
             metadata=metadata,
         )
 
-    @staticmethod
-    def coerce_payload(value: SourcePayload[Any] | Any) -> SourcePayload[Any]:
-        return value if isinstance(value, SourcePayload) else SourcePayload(value=value)
+    def coerce_payload(
+        self,
+        value: SourcePayload[Any] | Any,
+        *,
+        context: str,
+    ) -> SourcePayload[Any]:
+        payload = value if isinstance(value, SourcePayload) else SourcePayload(value=value)
+        return SourcePayload(
+            value=self.payload_isolator.copy(
+                payload.value,
+                context=context,
+            ),
+            observed_at=payload.observed_at,
+            metadata=self.payload_isolator.copy_metadata(
+                payload.metadata,
+                context=f"{context} metadata",
+            ),
+        )
 
     @staticmethod
     def is_retryable(error: Exception) -> bool:

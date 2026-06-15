@@ -130,6 +130,23 @@ policy = FreshnessPolicy(
 
 Long-lived asynchronous applications can call `await builder.wait_for_refreshes()`. `SyncSnapshotBuilder.close()` waits for pending refreshes before stopping its event loop.
 
+## Payload isolation
+
+Coalestra deep-copies payload values and nested metadata when data crosses ownership boundaries. Source results, cache entries, publisher results, derived dependency snapshots, single-flight callers, and session snapshots therefore do not share mutable payload objects by default. Mutating one returned snapshot cannot modify the cache or another snapshot.
+
+Payloads must support `copy.deepcopy`. A payload that cannot be copied is reported as a structured `PayloadIsolationError` instead of being stored by reference. Integrations that use proven immutable values or specialized model-copying APIs may provide a custom copier:
+
+```python
+from coalestra import SnapshotBuilder
+
+builder = SnapshotBuilder(
+    sources,
+    payload_copier=lambda value: value.model_copy(deep=True),
+)
+```
+
+`AsyncMemoryCache` and standalone `ResourcePublisher` instances accept the same `payload_copier` option. Returning the original object from a custom copier is safe only when the payload is deeply immutable.
+
 ## Snapshot diagnostics
 
 Every snapshot contains immutable acquisition diagnostics:
