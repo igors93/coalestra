@@ -167,14 +167,13 @@ def test_future_source_payload_falls_back_to_next_source() -> None:
 
 def test_small_future_clock_skew_is_recorded() -> None:
     key = ResourceKey("time", "skew")
-    now = time.time()
     builder = SnapshotBuilder(
         [
             CallableSource(
                 name="source",
                 priority=1,
                 supports=lambda _key: True,
-                fetcher=lambda *_: SourcePayload(value=1, observed_at=now + 0.01),
+                fetcher=lambda *_: SourcePayload(value=1, observed_at=time.time() + 0.5),
             )
         ],
         observation_policy=ObservationPolicy(future_tolerance_seconds=1),

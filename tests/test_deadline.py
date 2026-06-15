@@ -11,7 +11,7 @@ from coalestra import (
     ResourceResolutionError,
     SnapshotBuilder,
     SnapshotBuildError,
-    SourceTimeoutError,
+    SnapshotDeadlineExceededError,
 )
 from coalestra.resilience import RetryPolicy
 
@@ -43,6 +43,6 @@ def test_snapshot_deadline_limits_source_resolution() -> None:
 
         resolution = captured.value.errors[KEY]
         assert isinstance(resolution, ResourceResolutionError)
-        assert resolution.failures[0].error_type == SourceTimeoutError.__name__
+        assert resolution.failures[0].error_type == SnapshotDeadlineExceededError.__name__
 
     asyncio.run(scenario())
