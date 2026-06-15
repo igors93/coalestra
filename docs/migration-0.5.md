@@ -52,3 +52,19 @@ The default `ObservationPolicy` accepts up to one second of future clock skew an
 ## Source support caching
 
 `source.supports(key)` results are cached by default in a bounded LRU. Set `cache_supports=False` on a dynamic callable source or call `builder.clear_source_support_cache()` after reconfiguration.
+
+## Metric label migration
+
+Resource-related metrics no longer emit a full-key `resource` label. Replace queries such as:
+
+```text
+sum by (resource) (cache_access_total)
+```
+
+with resource-type aggregation:
+
+```text
+sum by (resource_namespace, resource_name) (cache_access_total)
+```
+
+Use structured events when symbol-, account-, subject-, or qualifier-level investigation is required.

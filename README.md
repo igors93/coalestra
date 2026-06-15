@@ -233,6 +233,17 @@ metrics.close()
 
 The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution.
 
+### Low-cardinality metric labels
+
+Default metrics describe resource types with `resource_namespace` and `resource_name`. They never include `ResourceKey.subject`, qualifier values, symbols, account identifiers, or the rendered full key. Detailed resource identity remains available in structured events.
+
+```text
+metric labels: resource_namespace="market", resource_name="price"
+event payload: resource="market:price:BTCUSDT?venue=spot"
+```
+
+This keeps metric series bounded when an application observes many symbols or accounts. Source labels should also use stable configured source names rather than per-request identifiers. Existing dashboards that query the former `resource` metric label must migrate to the two resource-type labels.
+
 ## Minimal build
 
 ```python

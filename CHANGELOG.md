@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replaced full resource-key metric labels with bounded `resource_namespace` and `resource_name` labels while preserving full resource identity in structured events.
+
 ## 0.5.5 - 2026-06-15
 
 - Added bounded non-blocking publication and invalidation submissions to the synchronous facade.

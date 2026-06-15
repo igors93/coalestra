@@ -281,3 +281,16 @@ bounded queue -> worker thread -> downstream sink
 ```
 
 The queue is bounded to prevent observability from becoming an unbounded memory leak. Overflow behavior is explicit and measurable. Downstream exceptions are counted by the buffer and never re-enter acquisition control flow.
+
+## Metric cardinality boundary
+
+Default metrics expose resource type, not resource instance identity. The stable labels are `resource_namespace` and `resource_name`. Subjects and qualifier values are excluded because they commonly contain symbols, accounts, tenants, or other unbounded identifiers.
+
+```text
+ResourceKey("market", "price", "BTCUSDT", {"venue": "spot"})
+        |
+        +-- metric labels: market / price
+        +-- event resource: market:price:BTCUSDT?venue=spot
+```
+
+Structured events retain the full rendered resource key for investigation. This separates aggregated monitoring from detailed diagnostics without removing context. Configured source names remain valid metric labels because the builder owns a bounded source catalog; applications should not create source names from per-resource identifiers.

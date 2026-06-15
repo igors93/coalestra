@@ -9,6 +9,7 @@ from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.errors import SourceUnavailableError
 from coalestra.core.models import FetchContext, ResourceKey
 from coalestra.core.protocols import Clock, EventSink, MetricsSink
+from coalestra.observability.labels import resource_metric_labels
 from coalestra.orchestration.runtime import ResolutionResult, ResolutionRuntime
 from coalestra.orchestration.singleflight import SingleFlight
 
@@ -97,7 +98,11 @@ class RefreshManager:
             self._finish(resource, completed)
 
         task.add_done_callback(cleanup)
-        self.metrics.increment("resource_refresh_total", status="scheduled", resource=str(key))
+        self.metrics.increment(
+            "resource_refresh_total",
+            status="scheduled",
+            **resource_metric_labels(key),
+        )
         self.events.emit(
             "resource_refresh_scheduled",
             resource=str(key),
@@ -147,7 +152,11 @@ class RefreshManager:
                 )
                 raise error
             diagnostics.refresh_completed += 1
-            self.metrics.increment("resource_refresh_total", status="success", resource=str(key))
+            self.metrics.increment(
+                "resource_refresh_total",
+                status="success",
+                **resource_metric_labels(key),
+            )
             self.events.emit(
                 "resource_refresh_completed",
                 resource=str(key),
@@ -156,11 +165,19 @@ class RefreshManager:
             )
         except asyncio.CancelledError:
             diagnostics.refresh_failed += 1
-            self.metrics.increment("resource_refresh_total", status="cancelled", resource=str(key))
+            self.metrics.increment(
+                "resource_refresh_total",
+                status="cancelled",
+                **resource_metric_labels(key),
+            )
             raise
         except Exception as error:
             diagnostics.refresh_failed += 1
-            self.metrics.increment("resource_refresh_total", status="failure", resource=str(key))
+            self.metrics.increment(
+                "resource_refresh_total",
+                status="failure",
+                **resource_metric_labels(key),
+            )
             self.events.emit(
                 "resource_refresh_failed",
                 resource=str(key),

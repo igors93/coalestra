@@ -7,8 +7,20 @@ from typing import Any
 from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.isolation import PayloadIsolator
-from coalestra.core.models import CacheLookup, FreshnessPolicy, ResourceKey, SnapshotValue
-from coalestra.core.protocols import AsyncCache, BatchAsyncCache, Clock
+from coalestra.core.models import (
+    CacheLookup,
+    CacheWriteResult,
+    FreshnessPolicy,
+    ResourceKey,
+    SnapshotValue,
+)
+from coalestra.core.protocols import (
+    AsyncCache,
+    AtomicAsyncCache,
+    BatchAsyncCache,
+    BatchAtomicAsyncCache,
+    Clock,
+)
 
 
 class CacheAccess:
@@ -69,10 +81,10 @@ class CacheAccess:
         values: Collection[SnapshotValue[Any]],
         *,
         diagnostics: DiagnosticsCollector,
-    ) -> None:
+    ) -> Mapping[ResourceKey, CacheWriteResult] | None:
         unique = tuple({value.key: value for value in values}.values())
         if not unique:
-            return
+            return None
         isolated = tuple(
             self.payload_isolator.clone_snapshot_value(
                 value,
@@ -80,10 +92,25 @@ class CacheAccess:
             )
             for value in unique
         )
+        if isinstance(self.cache, BatchAtomicAsyncCache):
+            diagnostics.cache_batch_writes += 1
+            return await self.cache.set_many_if_newer(isolated)
         if isinstance(self.cache, BatchAsyncCache):
             diagnostics.cache_batch_writes += 1
             await self.cache.set_many(isolated)
-            return
+            return None
+        if isinstance(self.cache, AtomicAsyncCache):
+            cache = self.cache
+
+            async def write_atomic(value: SnapshotValue[Any]) -> CacheWriteResult:
+                return await cache.set_if_newer(value)
+
+            write_results = await run_bounded(
+                isolated,
+                write_atomic,
+                max_tasks=self.max_pending_tasks,
+            )
+            return {v.key: r for v, r in zip(isolated, write_results, strict=True)}
 
         async def write_one(value: SnapshotValue[Any]) -> None:
             await self.cache.set(value)
@@ -93,6 +120,7 @@ class CacheAccess:
             write_one,
             max_tasks=self.max_pending_tasks,
         )
+        return None
 
     def cached_copy(
         self,

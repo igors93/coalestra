@@ -20,6 +20,7 @@ from coalestra.core.errors import (
 from coalestra.core.health import BuilderHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
+    CacheWriteStatus,
     FetchContext,
     FreshnessPolicy,
     RefreshMode,
@@ -32,6 +33,7 @@ from coalestra.core.protocols import AsyncCache, Clock, EventSink, MetricsSink, 
 from coalestra.core.quality import ObservationPolicy
 from coalestra.core.request import SnapshotRequest
 from coalestra.observability.events import NullEventSink
+from coalestra.observability.labels import resource_metric_labels
 from coalestra.observability.metrics import NullMetrics
 from coalestra.orchestration.cache_access import CacheAccess
 from coalestra.orchestration.lifecycle import close_components
@@ -382,7 +384,7 @@ class SnapshotBuilder:
                 self.metrics.increment(
                     "cache_access_total",
                     status="revalidation_bypass",
-                    resource=str(key),
+                    **resource_metric_labels(key),
                 )
                 self.events.emit(
                     "cache_bypassed",
@@ -411,7 +413,11 @@ class SnapshotBuilder:
             age = lookup.age_seconds
             if lookup.fresh and lookup.value is not None:
                 runtime.diagnostics.cache_hits += 1
-                self.metrics.increment("cache_access_total", status="fresh", resource=str(key))
+                self.metrics.increment(
+                    "cache_access_total",
+                    status="fresh",
+                    **resource_metric_labels(key),
+                )
                 self.events.emit("cache_hit", resource=str(key), freshness="fresh")
                 refresh_scheduled = False
                 if age is not None and policy.should_refresh_ahead(age):
@@ -442,7 +448,7 @@ class SnapshotBuilder:
                 self.metrics.increment(
                     "cache_access_total",
                     status="stale_while_revalidate",
-                    resource=str(key),
+                    **resource_metric_labels(key),
                 )
                 refresh_scheduled = self._refresh_manager.schedule(
                     key,
@@ -463,7 +469,11 @@ class SnapshotBuilder:
                 continue
 
             runtime.diagnostics.cache_misses += 1
-            self.metrics.increment("cache_access_total", status="miss", resource=str(key))
+            self.metrics.increment(
+                "cache_access_total",
+                status="miss",
+                **resource_metric_labels(key),
+            )
             if lookup.usable_stale and lookup.value is not None:
                 stale_candidates[key] = lookup.value
             pending.append(key)
@@ -509,7 +519,10 @@ class SnapshotBuilder:
                 value = result.value
                 if joined_existing:
                     runtime.diagnostics.coalesced_requests += 1
-                    self.metrics.increment("singleflight_join_total", resource=str(key))
+                    self.metrics.increment(
+                        "singleflight_join_total",
+                        **resource_metric_labels(key),
+                    )
                     value = replace(
                         value,
                         metadata={**value.metadata, "coalesced_request": True},
@@ -533,7 +546,7 @@ class SnapshotBuilder:
                 self.metrics.increment(
                     "cache_access_total",
                     status="stale_fallback",
-                    resource=str(key),
+                    **resource_metric_labels(key),
                 )
                 self.events.emit(
                     "stale_fallback_used",
@@ -694,12 +707,23 @@ class SnapshotBuilder:
                 )
 
             if fresh_values:
-                superseded = await self._check_authority_supersession(
-                    fresh_values, runtime=runtime, resolved=resolved
+                write_results = await self._cache_access.set_many(
+                    fresh_values, diagnostics=runtime.diagnostics
                 )
-                to_cache = [v for v in fresh_values if v.key not in superseded]
-                if to_cache:
-                    await self._cache_access.set_many(to_cache, diagnostics=runtime.diagnostics)
+                if write_results:
+                    for written in fresh_values:
+                        result = write_results.get(written.key)
+                        if (
+                            result is not None
+                            and result.status is CacheWriteStatus.IGNORED_LOWER_AUTHORITY
+                        ):
+                            winning = self._cache_access.cached_copy(
+                                result.value,
+                                stale=False,
+                                extra_metadata={"superseded_source": written.source},
+                            )
+                            runtime.memo[written.key] = winning
+                            resolved[written.key] = ResolutionResult(value=winning)
 
             unresolved = [key for key in unresolved if key not in resolved]
             if not unresolved:
@@ -726,60 +750,6 @@ class SnapshotBuilder:
         if stale_to_cache and runtime.cache_stale_results:
             await self._cache_access.set_many(stale_to_cache, diagnostics=runtime.diagnostics)
         return resolved
-
-    async def _check_authority_supersession(
-        self,
-        fresh_values: list[SnapshotValue[Any]],
-        *,
-        runtime: ResolutionRuntime,
-        resolved: dict[ResourceKey, ResolutionResult],
-    ) -> frozenset[ResourceKey]:
-        """Detect source results that were superseded by a concurrent higher-authority publication.
-
-        When a high-authority value is published while a source fetch is in flight, the cache
-        already holds the authoritative result by the time the source returns. This method reads
-        those cached values and, for any key where the cached authority rank exceeds the source
-        result's rank, replaces the tentative resolution with the cached value and annotates it
-        with ``superseded_source``.
-        """
-        if not self.authority_resolver.has_rules:
-            return frozenset()
-
-        fresh_by_key = {v.key: v for v in fresh_values}
-        all_values_policy = FreshnessPolicy(
-            ttl_seconds=float("inf"),
-            max_stale_seconds=float("inf"),
-        )
-        lookups = await self._cache_access.get_many(
-            list(fresh_by_key),
-            now=self.clock.now(),
-            policies=dict.fromkeys(fresh_by_key, all_values_policy),
-            diagnostics=runtime.diagnostics,
-        )
-        superseded: set[ResourceKey] = set()
-        for key, source_value in fresh_by_key.items():
-            lookup = lookups[key]
-            if (
-                lookup.value is not None
-                and lookup.value.authority_rank > source_value.authority_rank
-            ):
-                cached = self._cache_access.cached_copy(
-                    lookup.value,
-                    stale=not lookup.fresh,
-                    extra_metadata={"superseded_source": source_value.source},
-                )
-                runtime.memo[key] = cached
-                resolved[key] = ResolutionResult(value=cached)
-                superseded.add(key)
-                self.events.emit(
-                    "source_result_superseded",
-                    resource=str(key),
-                    source=source_value.source,
-                    superseded_by=lookup.value.source,
-                    source_authority_rank=source_value.authority_rank,
-                    cached_authority_rank=lookup.value.authority_rank,
-                )
-        return frozenset(superseded)
 
     def _ensure_open(self) -> None:
         if self._closed:

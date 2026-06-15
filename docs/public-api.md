@@ -239,6 +239,13 @@ Additional metric names emitted by version 0.3 include:
 - `resource_publish_total`
 - `resource_invalidation_total`
 
+Metrics associated with a resource use only these bounded labels:
+
+- `resource_namespace`
+- `resource_name`
+
+The previous `resource` label containing the complete rendered key is no longer emitted. Subjects and qualifier values remain available on structured events such as `resource_published`, `resource_invalidated`, `cache_hit`, and `resource_resolved`. Source labels are intended for stable configured source names.
+
 Additional event types include:
 
 - `source_circuit_open`

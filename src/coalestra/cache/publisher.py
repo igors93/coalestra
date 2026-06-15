@@ -31,6 +31,7 @@ from coalestra.core.protocols import (
     MetricsSink,
 )
 from coalestra.core.quality import ObservationPolicy, require_finite_timestamp
+from coalestra.observability.labels import resource_metric_labels
 
 T = TypeVar("T")
 
@@ -318,7 +319,10 @@ class ResourcePublisher:
                     max_tasks=self.max_pending_tasks,
                 )
         for key in unique:
-            self.metrics.increment("resource_invalidation_total", resource=str(key))
+            self.metrics.increment(
+                "resource_invalidation_total",
+                **resource_metric_labels(key),
+            )
             self.events.emit("resource_invalidated", resource=str(key), reason=reason)
 
     async def _get_existing(
@@ -502,7 +506,7 @@ class ResourcePublisher:
             "resource_publish_total",
             status=PublishStatus.PUBLISHED.value,
             source=update.source,
-            resource=str(update.key),
+            **resource_metric_labels(update.key),
         )
         self.events.emit(
             "resource_published",
@@ -524,7 +528,7 @@ class ResourcePublisher:
             "resource_publish_total",
             status=result.status.value,
             source=update.source,
-            resource=str(update.key),
+            **resource_metric_labels(update.key),
         )
         self.events.emit(
             "resource_publish_ignored",
