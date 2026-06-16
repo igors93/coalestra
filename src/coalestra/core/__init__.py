@@ -43,7 +43,19 @@ from coalestra.core.errors import (
     SourceUnavailableError,
     SubmissionBacklogFullError,
 )
-from coalestra.core.health import BuilderHealth, PayloadCopyHealth
+from coalestra.core.health import (
+    BUILDER_HEALTH_ASSESSMENT_SCHEMA,
+    BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION,
+    BUILDER_HEALTH_SCHEMA,
+    BUILDER_HEALTH_SCHEMA_VERSION,
+    BuilderHealth,
+    BuilderHealthAssessment,
+    BuilderHealthAssessmentPolicy,
+    BuilderHealthFinding,
+    BuilderHealthReason,
+    BuilderHealthSeverity,
+    PayloadCopyHealth,
+)
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator, deepcopy_payload
 from coalestra.core.keys import (
     CASE_INSENSITIVE_KEY_NORMALIZER,
@@ -87,6 +99,10 @@ from coalestra.core.quality import ObservationPolicy
 from coalestra.core.request import SnapshotRequest
 
 __all__ = [
+    "BUILDER_HEALTH_ASSESSMENT_SCHEMA",
+    "BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION",
+    "BUILDER_HEALTH_SCHEMA",
+    "BUILDER_HEALTH_SCHEMA_VERSION",
     "CASE_INSENSITIVE_KEY_NORMALIZER",
     "ERROR_DIAGNOSTICS_SCHEMA",
     "ERROR_DIAGNOSTICS_SCHEMA_VERSION",
@@ -103,6 +119,11 @@ __all__ = [
     "BatchSizedSource",
     "BatchSnapshotSource",
     "BuilderHealth",
+    "BuilderHealthAssessment",
+    "BuilderHealthAssessmentPolicy",
+    "BuilderHealthFinding",
+    "BuilderHealthReason",
+    "BuilderHealthSeverity",
     "CacheLookup",
     "CacheWriteResult",
     "CacheWriteStatus",

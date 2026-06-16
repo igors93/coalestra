@@ -1,10 +1,172 @@
 from __future__ import annotations
 
+import math
 import threading
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, fields, is_dataclass
+from enum import Enum
 from types import MappingProxyType
 from typing import Any
+
+BUILDER_HEALTH_SCHEMA = "coalestra.builder-health"
+BUILDER_HEALTH_SCHEMA_VERSION = 1
+BUILDER_HEALTH_ASSESSMENT_SCHEMA = "coalestra.builder-health-assessment"
+BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION = 1
+
+
+class BuilderHealthSeverity(str, Enum):
+    """Stable severity levels returned by builder health assessment."""
+
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+
+
+class BuilderHealthReason(str, Enum):
+    """Stable low-cardinality reasons produced by builder health assessment."""
+
+    BUILDER_CLOSED = "builder_closed"
+    SOURCE_CAPACITY_WAITING = "source_capacity_waiting"
+    PAYLOAD_COPY_CAPACITY_WAITING = "payload_copy_capacity_waiting"
+    SUBMISSION_BACKLOG_HIGH = "submission_backlog_high"
+    OBSERVABILITY_BACKLOG_HIGH = "observability_backlog_high"
+    CIRCUIT_OPEN = "circuit_open"
+    CIRCUIT_HALF_OPEN = "circuit_half_open"
+    PAYLOAD_COPY_SHUTDOWN_INCOMPLETE = "payload_copy_shutdown_incomplete"
+    OBSERVABILITY_SHUTDOWN_INCOMPLETE = "observability_shutdown_incomplete"
+    OBSERVABILITY_WORKER_STOPPED = "observability_worker_stopped"
+    QUEUE_TIMEOUTS_INCREASED = "queue_timeouts_increased"
+    SOURCE_TIMEOUTS_INCREASED = "source_timeouts_increased"
+    DEADLINES_EXCEEDED_INCREASED = "deadlines_exceeded_increased"
+    REVALIDATION_FAILURES_INCREASED = "revalidation_failures_increased"
+    PAYLOAD_COPY_FAILURES_INCREASED = "payload_copy_failures_increased"
+    PAYLOAD_COPY_TIMEOUTS_INCREASED = "payload_copy_timeouts_increased"
+    PAYLOAD_COPY_SHUTDOWN_TIMEOUTS_INCREASED = "payload_copy_shutdown_timeouts_increased"
+    OBSERVABILITY_DROPS_INCREASED = "observability_drops_increased"
+    OBSERVABILITY_SHUTDOWN_TIMEOUTS_INCREASED = "observability_shutdown_timeouts_increased"
+    OBSERVABILITY_FAILURES_INCREASED = "observability_failures_increased"
+
+
+@dataclass(frozen=True)
+class BuilderHealthAssessmentPolicy:
+    """Thresholds used to classify a ``BuilderHealth`` snapshot.
+
+    Current-state thresholds are always evaluated. Cumulative counter thresholds
+    are evaluated only when a previous health snapshot is provided, preventing one
+    historical failure from making every later point-in-time assessment degraded.
+    """
+
+    capacity_waiting_degraded: int = 1
+    capacity_waiting_critical_ratio: float = 1.0
+    copy_waiting_degraded: int = 1
+    copy_waiting_critical_ratio: float = 1.0
+    submission_backlog_degraded_ratio: float = 0.5
+    submission_backlog_critical_ratio: float = 0.9
+    observability_backlog_degraded_ratio: float = 0.5
+    observability_backlog_critical_ratio: float = 0.9
+    counter_delta_degraded: int = 1
+    counter_delta_critical: int = 5
+
+    def __post_init__(self) -> None:
+        for name in (
+            "capacity_waiting_degraded",
+            "copy_waiting_degraded",
+            "counter_delta_degraded",
+            "counter_delta_critical",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < 1:
+                raise ValueError(f"{name} must be at least 1")
+
+        if self.counter_delta_critical < self.counter_delta_degraded:
+            raise ValueError(
+                "counter_delta_critical must be greater than or equal to counter_delta_degraded"
+            )
+
+        for name in (
+            "capacity_waiting_critical_ratio",
+            "copy_waiting_critical_ratio",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+
+        for degraded_name, critical_name in (
+            (
+                "submission_backlog_degraded_ratio",
+                "submission_backlog_critical_ratio",
+            ),
+            (
+                "observability_backlog_degraded_ratio",
+                "observability_backlog_critical_ratio",
+            ),
+        ):
+            degraded = getattr(self, degraded_name)
+            critical = getattr(self, critical_name)
+            for name, value in ((degraded_name, degraded), (critical_name, critical)):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise TypeError(f"{name} must be a number")
+                if not math.isfinite(float(value)) or not 0 < float(value) <= 1:
+                    raise ValueError(f"{name} must be greater than 0 and at most 1")
+            if float(critical) < float(degraded):
+                raise ValueError(
+                    f"{critical_name} must be greater than or equal to {degraded_name}"
+                )
+
+
+@dataclass(frozen=True)
+class BuilderHealthFinding:
+    """One stable and actionable reason contributing to health severity."""
+
+    reason: BuilderHealthReason
+    severity: BuilderHealthSeverity
+    metric: str
+    observed: int | float | bool
+    threshold: int | float | bool | None = None
+    component: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a stable JSON-safe representation of this finding."""
+
+        return {
+            "reason": self.reason.value,
+            "severity": self.severity.value,
+            "metric": self.metric,
+            "observed": self.observed,
+            "threshold": self.threshold,
+            "component": self.component,
+        }
+
+
+@dataclass(frozen=True)
+class BuilderHealthAssessment:
+    """Immutable severity assessment derived from one builder health snapshot."""
+
+    severity: BuilderHealthSeverity
+    findings: tuple[BuilderHealthFinding, ...] = ()
+    baseline_used: bool = False
+
+    @property
+    def reasons(self) -> tuple[BuilderHealthReason, ...]:
+        """Return unique reasons in deterministic finding order."""
+
+        return tuple(dict.fromkeys(finding.reason for finding in self.findings))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a versioned JSON-safe assessment payload."""
+
+        return {
+            "schema": BUILDER_HEALTH_ASSESSMENT_SCHEMA,
+            "schema_version": BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION,
+            "severity": self.severity.value,
+            "baseline_used": self.baseline_used,
+            "reasons": [reason.value for reason in self.reasons],
+            "findings": [finding.to_dict() for finding in self.findings],
+        }
 
 
 @dataclass(frozen=True)
@@ -225,6 +387,56 @@ class BuilderHealth:
             MappingProxyType(dict(self.observability_buffers)),
         )
 
+    def assess(
+        self,
+        *,
+        previous: BuilderHealth | None = None,
+        policy: BuilderHealthAssessmentPolicy | None = None,
+    ) -> BuilderHealthAssessment:
+        """Classify this snapshot using current state and optional counter deltas."""
+
+        if previous is not None and not isinstance(previous, BuilderHealth):
+            raise TypeError("previous must be a BuilderHealth or None")
+        if policy is not None and not isinstance(policy, BuilderHealthAssessmentPolicy):
+            raise TypeError("policy must be a BuilderHealthAssessmentPolicy or None")
+        return _assess_builder_health(
+            self,
+            previous=previous,
+            policy=policy or BuilderHealthAssessmentPolicy(),
+        )
+
+    def to_dict(
+        self,
+        *,
+        include_assessment: bool = True,
+        previous: BuilderHealth | None = None,
+        assessment_policy: BuilderHealthAssessmentPolicy | None = None,
+    ) -> dict[str, Any]:
+        """Return a versioned JSON-safe representation of the complete health state."""
+
+        if not isinstance(include_assessment, bool):
+            raise TypeError("include_assessment must be a boolean")
+        if previous is not None and not isinstance(previous, BuilderHealth):
+            raise TypeError("previous must be a BuilderHealth or None")
+        if assessment_policy is not None and not isinstance(
+            assessment_policy,
+            BuilderHealthAssessmentPolicy,
+        ):
+            raise TypeError("assessment_policy must be a BuilderHealthAssessmentPolicy or None")
+
+        payload = {
+            "schema": BUILDER_HEALTH_SCHEMA,
+            "schema_version": BUILDER_HEALTH_SCHEMA_VERSION,
+        }
+        for health_field in fields(self):
+            payload[health_field.name] = _json_safe(getattr(self, health_field.name))
+        payload["assessment"] = (
+            self.assess(previous=previous, policy=assessment_policy).to_dict()
+            if include_assessment
+            else None
+        )
+        return payload
+
 
 @dataclass(frozen=True)
 class OperationalHealthSnapshot:
@@ -293,3 +505,357 @@ class OperationalHealthTracker:
                 revalidation_attempt_count=self._revalidation_attempt_count,
                 revalidation_failure_count=self._revalidation_failure_count,
             )
+
+
+def _assess_builder_health(
+    health: BuilderHealth,
+    *,
+    previous: BuilderHealth | None,
+    policy: BuilderHealthAssessmentPolicy,
+) -> BuilderHealthAssessment:
+    findings: list[BuilderHealthFinding] = []
+
+    def add(
+        reason: BuilderHealthReason,
+        severity: BuilderHealthSeverity,
+        metric: str,
+        observed: int | float | bool,
+        threshold: int | float | bool | None = None,
+        component: str = "",
+    ) -> None:
+        findings.append(
+            BuilderHealthFinding(
+                reason=reason,
+                severity=severity,
+                metric=metric,
+                observed=observed,
+                threshold=threshold,
+                component=component,
+            )
+        )
+
+    if health.closed:
+        add(
+            BuilderHealthReason.BUILDER_CLOSED,
+            BuilderHealthSeverity.CRITICAL,
+            "closed",
+            True,
+            False,
+        )
+
+    capacity_waiting = max(0, int(health.waiting_for_capacity))
+    if capacity_waiting >= policy.capacity_waiting_degraded:
+        capacity_ratio, capacity_component = _maximum_wait_ratio(health.capacity)
+        severity = (
+            BuilderHealthSeverity.CRITICAL
+            if capacity_ratio >= policy.capacity_waiting_critical_ratio
+            else BuilderHealthSeverity.DEGRADED
+        )
+        add(
+            BuilderHealthReason.SOURCE_CAPACITY_WAITING,
+            severity,
+            "maximum_waiting_to_limit_ratio"
+            if severity is BuilderHealthSeverity.CRITICAL
+            else "waiting_for_capacity",
+            capacity_ratio if severity is BuilderHealthSeverity.CRITICAL else capacity_waiting,
+            policy.capacity_waiting_critical_ratio
+            if severity is BuilderHealthSeverity.CRITICAL
+            else policy.capacity_waiting_degraded,
+            capacity_component,
+        )
+
+    copy_waiting = max(0, int(health.waiting_for_copy_capacity))
+    if copy_waiting >= policy.copy_waiting_degraded:
+        copy_ratio, copy_component = _maximum_copy_wait_ratio(health.payload_copy_components)
+        severity = (
+            BuilderHealthSeverity.CRITICAL
+            if copy_ratio >= policy.copy_waiting_critical_ratio
+            else BuilderHealthSeverity.DEGRADED
+        )
+        add(
+            BuilderHealthReason.PAYLOAD_COPY_CAPACITY_WAITING,
+            severity,
+            "maximum_waiting_to_limit_ratio"
+            if severity is BuilderHealthSeverity.CRITICAL
+            else "waiting_for_copy_capacity",
+            copy_ratio if severity is BuilderHealthSeverity.CRITICAL else copy_waiting,
+            policy.copy_waiting_critical_ratio
+            if severity is BuilderHealthSeverity.CRITICAL
+            else policy.copy_waiting_degraded,
+            copy_component,
+        )
+
+    submission_ratio = _safe_ratio(health.pending_submissions, health.max_pending_submissions)
+    if submission_ratio >= policy.submission_backlog_degraded_ratio:
+        severity = (
+            BuilderHealthSeverity.CRITICAL
+            if submission_ratio >= policy.submission_backlog_critical_ratio
+            else BuilderHealthSeverity.DEGRADED
+        )
+        add(
+            BuilderHealthReason.SUBMISSION_BACKLOG_HIGH,
+            severity,
+            "submission_backlog_ratio",
+            submission_ratio,
+            policy.submission_backlog_critical_ratio
+            if severity is BuilderHealthSeverity.CRITICAL
+            else policy.submission_backlog_degraded_ratio,
+        )
+
+    observability_ratio, observability_component = _maximum_observability_ratio(
+        health.observability_buffers
+    )
+    if observability_ratio >= policy.observability_backlog_degraded_ratio:
+        severity = (
+            BuilderHealthSeverity.CRITICAL
+            if observability_ratio >= policy.observability_backlog_critical_ratio
+            else BuilderHealthSeverity.DEGRADED
+        )
+        add(
+            BuilderHealthReason.OBSERVABILITY_BACKLOG_HIGH,
+            severity,
+            "observability_backlog_ratio",
+            observability_ratio,
+            policy.observability_backlog_critical_ratio
+            if severity is BuilderHealthSeverity.CRITICAL
+            else policy.observability_backlog_degraded_ratio,
+            observability_component,
+        )
+
+    stopped_workers = sum(
+        1
+        for stats in health.observability_buffers.values()
+        if not bool(getattr(stats, "worker_alive", False))
+        and not bool(getattr(stats, "closed", False))
+    )
+    if stopped_workers:
+        add(
+            BuilderHealthReason.OBSERVABILITY_WORKER_STOPPED,
+            BuilderHealthSeverity.CRITICAL,
+            "stopped_observability_workers",
+            stopped_workers,
+            0,
+        )
+
+    circuit_states = [
+        str(getattr(getattr(snapshot, "state", ""), "value", getattr(snapshot, "state", "")))
+        for snapshot in health.circuits.values()
+    ]
+    open_circuits = sum(state == "open" for state in circuit_states)
+    if open_circuits:
+        add(
+            BuilderHealthReason.CIRCUIT_OPEN,
+            BuilderHealthSeverity.DEGRADED,
+            "open_circuits",
+            open_circuits,
+            0,
+        )
+    half_open_circuits = sum(state == "half_open" for state in circuit_states)
+    if half_open_circuits:
+        add(
+            BuilderHealthReason.CIRCUIT_HALF_OPEN,
+            BuilderHealthSeverity.DEGRADED,
+            "half_open_circuits",
+            half_open_circuits,
+            0,
+        )
+
+    if health.payload_copy_shutdown_incomplete:
+        add(
+            BuilderHealthReason.PAYLOAD_COPY_SHUTDOWN_INCOMPLETE,
+            BuilderHealthSeverity.CRITICAL,
+            "payload_copy_shutdown_incomplete",
+            True,
+            False,
+        )
+    if health.observability_shutdown_incomplete:
+        add(
+            BuilderHealthReason.OBSERVABILITY_SHUTDOWN_INCOMPLETE,
+            BuilderHealthSeverity.CRITICAL,
+            "observability_shutdown_incomplete",
+            True,
+            False,
+        )
+
+    if previous is not None:
+        counter_specs = (
+            (
+                "queue_timeout_count",
+                BuilderHealthReason.QUEUE_TIMEOUTS_INCREASED,
+            ),
+            (
+                "source_timeout_count",
+                BuilderHealthReason.SOURCE_TIMEOUTS_INCREASED,
+            ),
+            (
+                "deadline_exceeded_count",
+                BuilderHealthReason.DEADLINES_EXCEEDED_INCREASED,
+            ),
+            (
+                "revalidation_failure_count",
+                BuilderHealthReason.REVALIDATION_FAILURES_INCREASED,
+            ),
+            (
+                "payload_copy_failure_count",
+                BuilderHealthReason.PAYLOAD_COPY_FAILURES_INCREASED,
+            ),
+            (
+                "payload_copy_timeout_count",
+                BuilderHealthReason.PAYLOAD_COPY_TIMEOUTS_INCREASED,
+            ),
+            (
+                "payload_copy_shutdown_timeout_count",
+                BuilderHealthReason.PAYLOAD_COPY_SHUTDOWN_TIMEOUTS_INCREASED,
+            ),
+            (
+                "observability_dropped_count",
+                BuilderHealthReason.OBSERVABILITY_DROPS_INCREASED,
+            ),
+            (
+                "observability_shutdown_timeout_count",
+                BuilderHealthReason.OBSERVABILITY_SHUTDOWN_TIMEOUTS_INCREASED,
+            ),
+            (
+                "observability_failure_count",
+                BuilderHealthReason.OBSERVABILITY_FAILURES_INCREASED,
+            ),
+        )
+        for field_name, reason in counter_specs:
+            current = max(0, int(getattr(health, field_name)))
+            prior = max(0, int(getattr(previous, field_name)))
+            delta = max(0, current - prior)
+            if delta < policy.counter_delta_degraded:
+                continue
+            severity = (
+                BuilderHealthSeverity.CRITICAL
+                if delta >= policy.counter_delta_critical
+                else BuilderHealthSeverity.DEGRADED
+            )
+            add(
+                reason,
+                severity,
+                f"delta_{field_name}",
+                delta,
+                policy.counter_delta_critical
+                if severity is BuilderHealthSeverity.CRITICAL
+                else policy.counter_delta_degraded,
+            )
+
+    severity = BuilderHealthSeverity.HEALTHY
+    if any(finding.severity is BuilderHealthSeverity.CRITICAL for finding in findings):
+        severity = BuilderHealthSeverity.CRITICAL
+    elif findings:
+        severity = BuilderHealthSeverity.DEGRADED
+
+    return BuilderHealthAssessment(
+        severity=severity,
+        findings=tuple(findings),
+        baseline_used=previous is not None,
+    )
+
+
+def _safe_ratio(numerator: int, denominator: int | None) -> float:
+    if denominator is None or int(denominator) <= 0:
+        return 0.0
+    return max(0.0, float(numerator) / float(denominator))
+
+
+def _maximum_wait_ratio(capacity: Mapping[str, Any]) -> tuple[float, str]:
+    maximum = 0.0
+    component = ""
+    for name, snapshot in capacity.items():
+        ratio = _safe_ratio(
+            int(getattr(snapshot, "waiting", 0)),
+            int(getattr(snapshot, "limit", 0)),
+        )
+        if ratio > maximum:
+            maximum = ratio
+            component = str(name)
+    return maximum, component
+
+
+def _maximum_copy_wait_ratio(
+    components: Mapping[str, PayloadCopyHealth],
+) -> tuple[float, str]:
+    maximum = 0.0
+    component = ""
+    for name, snapshot in components.items():
+        ratio = _safe_ratio(snapshot.waiting_for_capacity, snapshot.max_concurrency)
+        if ratio > maximum:
+            maximum = ratio
+            component = str(name)
+    return maximum, component
+
+
+def _maximum_observability_ratio(buffers: Mapping[str, Any]) -> tuple[float, str]:
+    maximum = 0.0
+    component = ""
+    for name, stats in buffers.items():
+        ratio = _safe_ratio(
+            int(getattr(stats, "pending", 0)),
+            int(getattr(stats, "max_pending", 0)),
+        )
+        if ratio > maximum:
+            maximum = ratio
+            component = str(name)
+    return maximum, component
+
+
+def _json_safe(value: Any, *, _seen: set[int] | None = None) -> Any:
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        if math.isnan(value):
+            return "nan"
+        return "infinity" if value > 0 else "-infinity"
+    if isinstance(value, Enum):
+        return _json_safe(value.value, _seen=_seen)
+
+    seen = set() if _seen is None else _seen
+    identity = id(value)
+    if identity in seen:
+        return {"type": _qualified_type_name(value), "cycle": True}
+
+    if isinstance(value, Mapping):
+        seen.add(identity)
+        try:
+            return {
+                str(key): _json_safe(item, _seen=seen)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        finally:
+            seen.remove(identity)
+
+    if is_dataclass(value) and not isinstance(value, type):
+        seen.add(identity)
+        try:
+            return {
+                item.name: _json_safe(getattr(value, item.name), _seen=seen)
+                for item in fields(value)
+            }
+        finally:
+            seen.remove(identity)
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        seen.add(identity)
+        try:
+            return [_json_safe(item, _seen=seen) for item in value]
+        finally:
+            seen.remove(identity)
+
+    if isinstance(value, (set, frozenset)):
+        seen.add(identity)
+        try:
+            serialized = [_json_safe(item, _seen=seen) for item in value]
+            return sorted(serialized, key=repr)
+        finally:
+            seen.remove(identity)
+
+    return {"type": _qualified_type_name(value)}
+
+
+def _qualified_type_name(value: Any) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"

@@ -5,6 +5,10 @@ AuthorityAwareCache
 AuthorityPolicyProvider
 AuthorityPolicyResolver
 AuthorityResolver
+BUILDER_HEALTH_ASSESSMENT_SCHEMA
+BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION
+BUILDER_HEALTH_SCHEMA
+BUILDER_HEALTH_SCHEMA_VERSION
 BatchAsyncCache
 BatchAtomicAsyncCache
 BatchSizedSource
@@ -14,6 +18,11 @@ BufferedEventSink
 BufferedMetricsSink
 BufferedSinkStats
 BuilderHealth
+BuilderHealthAssessment
+BuilderHealthAssessmentPolicy
+BuilderHealthFinding
+BuilderHealthReason
+BuilderHealthSeverity
 CASE_INSENSITIVE_KEY_NORMALIZER
 CacheLookup
 CacheStats

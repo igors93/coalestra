@@ -513,6 +513,26 @@ Returned by `await builder.health_snapshot()` and `sync_builder.health_snapshot(
 
 Current-state fields are point-in-time observations. Counter fields are process-local and cumulative since builder creation. `SyncSnapshotBuilder.health_snapshot()` overlays its thread-safe submission backlog state onto the underlying builder health snapshot.
 
+
+#### Official JSON-safe schema
+
+`BuilderHealth.to_dict()` serializes every public dataclass field through the versioned `coalestra.builder-health` schema. The payload includes `schema`, `schema_version`, all current health fields, and an optional nested assessment. Dataclasses and enums are normalized recursively, non-string mapping keys are rendered as stable strings, non-finite floats are converted to explicit string values, and unsupported custom cache-stat objects are represented by their qualified type rather than an unsafe `repr`.
+
+```python
+payload = health.to_dict(
+    include_assessment=True,
+    previous=previous_health,
+)
+```
+
+Consumers should branch on `BUILDER_HEALTH_SCHEMA_VERSION`, ignore unknown additive fields, and retain the previous immutable `BuilderHealth` object when counter-delta assessment is required.
+
+#### Severity assessment
+
+`BuilderHealth.assess()` returns a `BuilderHealthAssessment`. Its `severity` is a `BuilderHealthSeverity` value (`healthy`, `degraded`, or `critical`), and its immutable findings use stable `BuilderHealthReason` values. Each finding includes the metric, observed value, applied threshold, and an optional low-cardinality component name.
+
+The assessment always evaluates current state. Cumulative timeout, revalidation, copy, and observability counters are evaluated only when `previous=` is supplied, preventing historical incidents from permanently affecting point-in-time status. `BuilderHealthAssessmentPolicy` configures backlog ratios, waiter thresholds, and counter-delta thresholds.
+
 ### Adapter options
 
 `CallableSource`, `CallableBatchSource`, and `CallableDerivedSource` accept:

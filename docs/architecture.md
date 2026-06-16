@@ -297,7 +297,7 @@ Copy runners also have an explicit lifecycle. Shutdown atomically rejects new co
 
 The builder closes its shared runner and its owned default-cache runner concurrently so the configured timeout is a total budget rather than a separate full timeout per component. Standalone caches and publishers close only runners they own. After a synchronous shutdown timeout, the facade keeps its private event loop alive until late copy workers drain, then stops the loop automatically.
 
-The health model remains operational rather than prescriptive. Coalestra reports saturation and failures; the consuming application decides whether to alert, degrade, pause work, or continue. No resource subjects or qualifier values are added to health fields.
+The health model remains operational rather than business-prescriptive. Coalestra now supplies a generic severity assessment for infrastructure conditions, while the consuming application still decides whether to alert, degrade, pause work, or continue. `BuilderHealth.to_dict()` serializes the complete public state through a versioned JSON-safe schema, and `BuilderHealth.assess()` evaluates current saturation, lifecycle failures, circuit state, and optional cumulative-counter deltas against an immutable policy. No resource subjects or qualifier values are added to assessment findings.
 
 ## Synchronous submission backlog
 

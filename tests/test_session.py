@@ -20,6 +20,22 @@ KEY_A = ResourceKey("test", "value", "A")
 KEY_B = ResourceKey("test", "value", "B")
 
 
+class ManualClock:
+    def __init__(self) -> None:
+        self.wall_time = 1_000.0
+        self.monotonic_time = 100.0
+
+    def now(self) -> float:
+        return self.wall_time
+
+    def monotonic(self) -> float:
+        return self.monotonic_time
+
+    def advance(self, seconds: float) -> None:
+        self.wall_time += seconds
+        self.monotonic_time += seconds
+
+
 def test_session_accumulates_stages_with_one_identity_and_pins_values() -> None:
     calls: dict[ResourceKey, int] = {}
 
@@ -112,11 +128,10 @@ def test_session_strict_mode_raises_for_requested_existing_error() -> None:
 
 
 def test_session_deadline_is_shared_across_stages() -> None:
+    clock = ManualClock()
+
     async def fetch(key, _context):
-        if key == KEY_A:
-            await asyncio.sleep(0.03)
-        else:
-            await asyncio.sleep(0.04)
+        clock.advance(0.03 if key == KEY_A else 0.04)
         return key.subject
 
     async def scenario():
@@ -131,6 +146,7 @@ def test_session_deadline_is_shared_across_stages() -> None:
                 )
             ],
             retry_policy=RetryPolicy(max_attempts=1),
+            clock=clock,
         )
         async with builder.session(deadline_seconds=0.05) as session:
             await session.resolve([KEY_A])
@@ -555,21 +571,6 @@ def test_session_revalidation_uses_original_deadline_and_retains_previous_value(
         nonlocal calls
         calls += 1
         return calls
-
-    class ManualClock:
-        def __init__(self) -> None:
-            self.wall_time = 1_000.0
-            self.monotonic_time = 100.0
-
-        def now(self) -> float:
-            return self.wall_time
-
-        def monotonic(self) -> float:
-            return self.monotonic_time
-
-        def advance(self, seconds: float) -> None:
-            self.wall_time += seconds
-            self.monotonic_time += seconds
 
     async def scenario():
         clock = ManualClock()

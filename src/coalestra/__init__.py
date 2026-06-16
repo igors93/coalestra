@@ -19,6 +19,10 @@ from coalestra.concurrency import (
     CapacitySnapshot,
 )
 from coalestra.core import (
+    BUILDER_HEALTH_ASSESSMENT_SCHEMA,
+    BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION,
+    BUILDER_HEALTH_SCHEMA,
+    BUILDER_HEALTH_SCHEMA_VERSION,
     CASE_INSENSITIVE_KEY_NORMALIZER,
     ERROR_DIAGNOSTICS_SCHEMA,
     ERROR_DIAGNOSTICS_SCHEMA_VERSION,
@@ -35,6 +39,11 @@ from coalestra.core import (
     BatchSizedSource,
     BatchSnapshotSource,
     BuilderHealth,
+    BuilderHealthAssessment,
+    BuilderHealthAssessmentPolicy,
+    BuilderHealthFinding,
+    BuilderHealthReason,
+    BuilderHealthSeverity,
     CacheLookup,
     CacheWriteResult,
     CacheWriteStatus,
@@ -127,6 +136,10 @@ from coalestra.sync import (
 __version__ = "0.5.9"
 
 __all__ = [
+    "BUILDER_HEALTH_ASSESSMENT_SCHEMA",
+    "BUILDER_HEALTH_ASSESSMENT_SCHEMA_VERSION",
+    "BUILDER_HEALTH_SCHEMA",
+    "BUILDER_HEALTH_SCHEMA_VERSION",
     "CASE_INSENSITIVE_KEY_NORMALIZER",
     "ERROR_DIAGNOSTICS_SCHEMA",
     "ERROR_DIAGNOSTICS_SCHEMA_VERSION",
@@ -148,6 +161,11 @@ __all__ = [
     "BufferedMetricsSink",
     "BufferedSinkStats",
     "BuilderHealth",
+    "BuilderHealthAssessment",
+    "BuilderHealthAssessmentPolicy",
+    "BuilderHealthFinding",
+    "BuilderHealthReason",
+    "BuilderHealthSeverity",
     "CacheLookup",
     "CacheStats",
     "CacheWriteResult",

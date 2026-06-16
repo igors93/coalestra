@@ -85,53 +85,6 @@ updated = await session.revalidate(
 
 A revalidation consistency failure always retains the previous session state and raises `SnapshotConsistencyError`, including when `strict=False`. Freshness and observation skew remain separate checks: freshness limits how old one value may be, while skew limits how far apart a group of values may be.
 
-### Snapshot acceptance policies
-
-`SnapshotAcceptancePolicy` declares whether a resolved snapshot is suitable for a consumer, independently from whether the sources technically returned values:
-
-```python
-from coalestra import (
-    ResourceAcceptanceRule,
-    SnapshotAcceptancePolicy,
-    SnapshotRequest,
-    SnapshotRequirement,
-)
-
-policy = SnapshotAcceptancePolicy(
-    default_rule=ResourceAcceptanceRule(
-        max_age_seconds=3.0,
-        allow_stale=False,
-        minimum_authority_rank=200,
-    ),
-    requirements=(
-        SnapshotRequirement.all_of([ACCOUNT, POSITION], name="account-state"),
-        SnapshotRequirement.any_of(
-            [USER_DATA_POSITION, REST_POSITION],
-            name="position-source",
-        ),
-    ),
-)
-
-request = SnapshotRequest(
-    required=[ACCOUNT, POSITION],
-    optional=[USER_DATA_POSITION, REST_POSITION],
-    acceptance_policy=policy,
-)
-
-snapshot = await builder.build_request(request)
-```
-
-The default rule applies to required resources. Optional resources are checked only when `include_optional_resources=True`, when they have an explicit `resource_rules` entry, or when they participate in a requirement. Requirement-only alternatives may fail individually without rejecting the snapshot when the group still has enough acceptable members. Age and stale state are recalculated at evaluation time, so pinned session values cannot remain artificially fresh.
-
-A failure raises `SnapshotAcceptanceError`, remains compatible with `SnapshotBuildError`, preserves the partial snapshot, and exposes immutable violations. Revalidation accepts the same policy and is transactional: a rejected candidate never replaces the previously committed session state.
-
-```python
-updated = await session.revalidate(
-    [POSITION, OPEN_ORDERS, ACCOUNT],
-    acceptance_policy=policy,
-)
-```
-
 ### Versioned error diagnostics
 
 `SourceFailure.to_dict()`, `ResourceResolutionError.to_dict()`, and `SnapshotBuildError.to_dict()` return a stable JSON-safe schema identified by `ERROR_DIAGNOSTICS_SCHEMA` and `ERROR_DIAGNOSTICS_SCHEMA_VERSION`. Consumers should branch on `schema_version` and ignore unknown fields so future additive changes remain compatible.
@@ -631,6 +584,32 @@ await builder.aclose()
 Standalone `AsyncMemoryCache` and `ResourcePublisher` instances close their owned copy runners through `aclose()`. Builder-created publishers share the builder runner and do not close it independently. The synchronous facade defers stopping its event loop after a shutdown timeout until late copy workers have actually finished.
 
 `sync_builder.health_snapshot()` adds `pending_submissions` and `max_pending_submissions` from the synchronous non-blocking publication backlog. Counters are process-local and cumulative since builder creation. The snapshot intentionally exposes aggregates only; it does not include symbols, subjects, qualifiers, or business decisions.
+
+
+### Versioned health serialization and severity
+
+`BuilderHealth.to_dict()` returns an official JSON-safe schema identified by `BUILDER_HEALTH_SCHEMA` and `BUILDER_HEALTH_SCHEMA_VERSION`. Nested dataclasses, enums, immutable mappings, circuit identities, cache statistics, copy components, and observability buffers are normalized automatically, so consumers do not need to maintain a manual list of fields whenever Coalestra adds health signals.
+
+```python
+previous = None
+health = await builder.health_snapshot()
+payload = health.to_dict(previous=previous)
+
+print(payload["schema"])
+print(payload["assessment"]["severity"])
+previous = health
+```
+
+`BuilderHealth.assess()` returns `BuilderHealthAssessment` with one of three stable severities: `healthy`, `degraded`, or `critical`. Current-state checks cover closed builders, capacity waiters, submission and observability backlog ratios, open or half-open circuits, stopped observability workers, and incomplete shutdowns. Cumulative counters are assessed only when a previous snapshot is supplied; this reports new failures without making one historical timeout permanently degrade every later health sample.
+
+```python
+assessment = health.assess(previous=previous)
+
+for finding in assessment.findings:
+    print(finding.reason.value, finding.severity.value, finding.observed)
+```
+
+Thresholds are configurable through `BuilderHealthAssessmentPolicy`. The default policy is conservative and generic; applications remain responsible for deciding which business actions follow a degraded or critical result.
 
 ## Architectural boundary
 

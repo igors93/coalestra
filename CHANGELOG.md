@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replaced the staged session deadline regression with a deterministic manual clock so platform scheduling cannot consume the first-stage budget.
+
 ## 0.5.9 - 2026-06-16
 
 - Added opt-in snapshot acceptance policies covering current resource age, dynamic stale state, and minimum source-authority rank.
@@ -9,7 +11,8 @@
 - Added per-resource rule overrides while keeping optional resources non-blocking unless explicitly included or required by a group.
 - Added `SnapshotAcceptanceError` with immutable violation details, partial-snapshot diagnostics, metrics, and structured events.
 - Applied acceptance policies transactionally to asynchronous and synchronous session revalidation so rejected candidates never replace pinned state.
-- Recomputed age and stale state at policy-evaluation time instead of trusting acquisition-time flags for long-lived sessions.
+- Added versioned JSON-safe `BuilderHealth.to_dict()` serialization that automatically includes current and future public health fields.
+- Added `BuilderHealth.assess()` with stable healthy, degraded, and critical severities, actionable reasons, configurable thresholds, and optional counter-delta baselines.
 
 ## 0.5.8 - 2026-06-15
 
