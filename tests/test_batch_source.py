@@ -174,6 +174,9 @@ class InvalidBatchSource:
     name = "invalid"
     priority = 1
     timeout_seconds = None
+    blocking_io = False
+    blocking_io_offloaded = False
+    transport_timeout_seconds = None
 
     def supports(self, _key: ResourceKey) -> bool:
         return True

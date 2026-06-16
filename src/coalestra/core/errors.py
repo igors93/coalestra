@@ -42,6 +42,31 @@ class CoalestraError(Exception):
     """Base exception for the library."""
 
 
+class CapabilityRequirementError(CoalestraError):
+    """Raised when an integration requires unavailable runtime capabilities."""
+
+    def __init__(
+        self,
+        *,
+        missing_features: tuple[str, ...],
+        schema_mismatches: Mapping[str, tuple[int, int | None]],
+    ) -> None:
+        self.missing_features = tuple(missing_features)
+        self.schema_mismatches = dict(schema_mismatches)
+        parts: list[str] = []
+        if self.missing_features:
+            parts.append("missing features: " + ", ".join(self.missing_features))
+        if self.schema_mismatches:
+            rendered = ", ".join(
+                f"{name}>={minimum} (installed={current})"
+                for name, (minimum, current) in sorted(self.schema_mismatches.items())
+            )
+            parts.append("schema requirements: " + rendered)
+        super().__init__(
+            "Coalestra capability requirements were not met (" + "; ".join(parts) + ")"
+        )
+
+
 class SourceUnavailableError(CoalestraError):
     """Raised when a source cannot serve a resource at this time."""
 

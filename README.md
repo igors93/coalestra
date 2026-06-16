@@ -22,22 +22,51 @@ It coalesces duplicate requests, batches compatible resources, derives values fr
 - Monotonic publication that rejects older or duplicate events by default.
 - Consolidated immutable diagnostics on every snapshot.
 - Optional observation-skew limits for temporally coherent request groups and revalidation.
-- Buffered event and metrics sinks that keep downstream I/O outside the acquisition path.
+- Automatic bounded buffering for external event and metrics sinks.
 - Replaceable cache, clock, event, and metrics interfaces.
 - Async API plus persistent synchronous facades.
 - Required/optional resource requests for integration-safe partial snapshots.
 - Deadline-aware retries, bounded batch chunking, and future-timestamp validation.
-- Health snapshots for cache, circuits, capacity, refreshes, and in-flight work.
+- Versioned health serialization, severity assessment, and runtime capability discovery.
+- Explicit timeout-safety contracts and runtime violation detection for blocking sources.
 - Fast inline execution for explicitly non-blocking local synchronous sources.
 - Strict static typing and no runtime dependencies.
 
 ## Installation
 
 ```bash
+python -m pip install coalestra==0.6.0
+```
+
+For development:
+
+```bash
 python -m pip install -e ".[dev]"
 ```
 
-Python 3.10 or newer is supported.
+Python 3.10 or newer is supported. Version 0.6 is classified as beta and exposes a
+versioned integration contract.
+
+### Runtime compatibility contract
+
+Applications can fail fast when an incompatible Coalestra installation is present:
+
+```python
+from coalestra import require_capabilities
+
+require_capabilities(
+    features=(
+        "snapshot_acceptance",
+        "transactional_revalidation",
+        "builder_health_serialization",
+        "blocking_source_timeout_guarantees",
+    ),
+    schemas={"builder_health": 1, "error_diagnostics": 1},
+)
+```
+
+`capabilities().to_dict()` returns the package version, 0.6 API-stability identifier,
+stable feature names, schema versions, and safety-related defaults.
 
 ## Integration-ready requests
 
@@ -84,6 +113,16 @@ updated = await session.revalidate(
 ```
 
 A revalidation consistency failure always retains the previous session state and raises `SnapshotConsistencyError`, including when `strict=False`. Freshness and observation skew remain separate checks: freshness limits how old one value may be, while skew limits how far apart a group of values may be.
+
+### Snapshot acceptance
+
+`SnapshotAcceptancePolicy` validates whether resolved data is suitable for use, not merely
+whether a source returned it. Policies can enforce current age, stale state, authority rank,
+all-of groups, alternatives, and quorum requirements. The same policy can be applied
+transactionally during session revalidation so rejected candidates never replace pinned state.
+
+See [Migration to 0.6](docs/migration-0.6.md) and the
+[Public API](docs/public-api.md) for complete examples.
 
 ### Versioned error diagnostics
 
@@ -246,22 +285,25 @@ Diagnostics include requested, resolved and failed resource counts; cache hits/m
 
 ## Buffered observability
 
-Wrap a potentially slow sink so logging or metrics export does not run on the acquisition path:
+`SnapshotBuilder` automatically wraps unknown external metrics and event sinks in bounded
+worker-thread buffers. Slow file, network, or audit-log delivery therefore does not execute
+on the acquisition path by default. Built-in non-blocking sinks and already-buffered sinks
+remain direct.
 
 ```python
-from coalestra import BufferedEventSink, BufferedMetricsSink
-
-events = BufferedEventSink(file_event_sink, max_pending=10_000)
-metrics = BufferedMetricsSink(prometheus_adapter, max_pending=10_000)
-
-builder = SnapshotBuilder(sources, events=events, metrics=metrics)
-
-# During shutdown
-events.close()
-metrics.close()
+builder = SnapshotBuilder(
+    sources,
+    events=file_event_sink,
+    metrics=metrics_adapter,
+    observability_max_pending=10_000,
+    observability_overflow=BufferOverflowPolicy.DROP_OLDEST,
+)
 ```
 
-The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution.
+Set `buffer_observability=False` only when the downstream sink is known to be non-blocking.
+Overflow, failures, pending work, peak usage, and shutdown state are exposed through
+`BuilderHealth`. Standalone `BufferedEventSink` and `BufferedMetricsSink` remain available
+for sinks used outside a builder.
 
 ### Low-cardinality metric labels
 
@@ -557,9 +599,9 @@ The declaration is a contract: Coalestra cannot inspect a third-party client to 
 
 Before starting a protected blocking call, Coalestra compares the declared transport timeout with the effective source/deadline budget. If the remaining budget is too small, the call is rejected before a worker thread starts. This prevents work that is already guaranteed to finish too late from consuming capacity.
 
-Custom sources may expose `blocking_io`, `blocking_io_offloaded`, and `transport_timeout_seconds`. Set `require_source_timeout_declarations=True` on the builder to reject legacy custom sources that do not declare the capability. Standard callable adapters always declare it and default to non-blocking unless explicitly marked.
+Custom sources expose `blocking_io`, `blocking_io_offloaded`, and `transport_timeout_seconds`. In 0.6, `require_source_timeout_declarations=True` is the default. Legacy integrations may temporarily opt out, but production integrations should keep the strict default. Standard callable adapters expose the declaration directly.
 
-Timeout declarations are visible through `health.source_timeout_guarantees`, with aggregate protected, unsafe, blocking, and undeclared counts.
+Timeout declarations are visible through `health.source_timeout_guarantees`, with aggregate protected, unsafe, blocking, and undeclared counts. If observed execution exceeds the declared transport timeout plus the scheduler grace, Coalestra increments `source_transport_timeout_violation_count`, records the responsible source in `source_transport_timeout_violations`, and emits a bounded metric and event.
 
 ## Operational health
 
@@ -624,7 +666,7 @@ print(payload["assessment"]["severity"])
 previous = health
 ```
 
-`BuilderHealth.assess()` returns `BuilderHealthAssessment` with one of three stable severities: `healthy`, `degraded`, or `critical`. Current-state checks cover closed builders, unsafe blocking-source declarations, capacity waiters, submission and observability backlog ratios, open or half-open circuits, stopped observability workers, and incomplete shutdowns. Cumulative counters are assessed only when a previous snapshot is supplied; this reports new failures without making one historical timeout permanently degrade every later health sample.
+`BuilderHealth.assess()` returns `BuilderHealthAssessment` with one of three stable severities: `healthy`, `degraded`, or `critical`. Current-state checks cover closed builders, capacity waiters, submission and observability backlog ratios, open or half-open circuits, stopped observability workers, and incomplete shutdowns. Cumulative counters are assessed only when a previous snapshot is supplied; this reports new failures without making one historical timeout permanently degrade every later health sample.
 
 ```python
 assessment = health.assess(previous=previous)
@@ -659,7 +701,7 @@ src/coalestra/
 make quality
 ```
 
-The quality gate checks formatting without modifying files, runs lint and strict mypy, verifies the 700-test minimum, executes deterministic concurrency regressions and the complete suite, validates version consistency, builds both distributions, installs the wheel in a clean virtual environment, and checks the exact public API manifest.
+The quality gate checks formatting without modifying files, runs lint and strict mypy, verifies the 700-test minimum, executes deterministic concurrency regressions and the complete suite, validates version consistency, verifies the 0.6 capability and safety contract, builds both distributions, installs the wheel in a clean virtual environment, and checks the exact public API manifest.
 
 ```bash
 make release-check
@@ -671,9 +713,9 @@ The release gate uses the same checks locally. GitHub Actions repeats the suppor
 
 - [Architecture](docs/architecture.md)
 - [Public API](docs/public-api.md)
-- [Migration from 0.4](docs/migration-0.5.md)
-- [Revisão final para integração](docs/integration-readiness.pt-BR.md)
-- [Integração com o Alphora](docs/alphora-integration.pt-BR.md)
+- [Migration to 0.6](docs/migration-0.6.md)
+- [Integration readiness](docs/integration-readiness.md)
+- [Integração do Alphora com o Coalestra 0.6](docs/alphora-integration.pt-BR.md)
 - [Changelog](CHANGELOG.md)
 
 ## License

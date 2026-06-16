@@ -205,3 +205,72 @@ def test_strict_declaration_mode_rejects_legacy_custom_source() -> None:
             [LegacySource()],
             require_source_timeout_declarations=True,
         )
+
+
+def test_builder_requires_custom_source_timeout_declarations_by_default() -> None:
+    class LegacySource:
+        name = "legacy-default"
+        priority = 1
+        timeout_seconds = 1.0
+
+        def supports(self, _key: ResourceKey) -> bool:
+            return True
+
+        async def fetch(self, _key, _context):
+            return "ok"
+
+    with pytest.raises(ValueError, match="must explicitly declare"):
+        SnapshotBuilder([LegacySource()])
+
+
+def test_runtime_transport_timeout_contract_violation_is_reported() -> None:
+    import time
+
+    async def scenario() -> None:
+        source = CallableSource(
+            name="slow-transport",
+            priority=1,
+            supports=lambda _key: True,
+            fetcher=lambda _key, _context: (time.sleep(0.03), "ok")[1],
+            timeout_seconds=0.2,
+            blocking_io=True,
+            transport_timeout_seconds=0.005,
+        )
+        builder = SnapshotBuilder(
+            [source],
+            source_transport_timeout_grace_seconds=0.0,
+        )
+        try:
+            snapshot = await builder.build([KEY])
+            baseline = await builder.health_snapshot()
+
+            assert snapshot.value(KEY) == "ok"
+            assert baseline.source_transport_timeout_violation_count == 1
+            assert baseline.source_transport_timeout_violations == {"slow-transport": 1}
+            assert baseline.to_dict()["source_transport_timeout_violations"] == {
+                "slow-transport": 1
+            }
+
+            # A baseline is required because violation counters are cumulative.
+            assessment = baseline.assess(previous=BuilderHealthLike.zero(baseline))
+            assert assessment.severity is BuilderHealthSeverity.DEGRADED
+            assert (
+                BuilderHealthReason.SOURCE_TRANSPORT_TIMEOUT_VIOLATIONS_INCREASED
+                in assessment.reasons
+            )
+        finally:
+            await builder.aclose()
+
+    # Build a compatible zero-counter baseline without manually listing BuilderHealth fields.
+    from dataclasses import replace
+
+    class BuilderHealthLike:
+        @staticmethod
+        def zero(health):
+            return replace(
+                health,
+                source_transport_timeout_violation_count=0,
+                source_transport_timeout_violations={},
+            )
+
+    asyncio.run(scenario())

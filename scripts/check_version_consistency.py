@@ -51,6 +51,17 @@ def _changelog_versions(changelog_path: Path) -> tuple[str, ...]:
     return tuple(versions)
 
 
+def _lock_version(lock_path: Path) -> str | None:
+    if not lock_path.exists():
+        return None
+    with lock_path.open("rb") as file:
+        data: dict[str, Any] = tomllib.load(file)
+    for package in data.get("package", []):
+        if package.get("name") == "coalestra":
+            return str(package.get("version"))
+    return None
+
+
 def _normalize_tag(tag: str) -> str:
     normalized = tag.strip()
     if normalized.startswith("refs/tags/"):
@@ -71,12 +82,17 @@ def main() -> int:
     project_version = _project_version(root / "pyproject.toml")
     package_version = _package_version(root / "src" / "coalestra" / "__init__.py")
     changelog_versions = _changelog_versions(root / "CHANGELOG.md")
+    lock_version = _lock_version(root / "uv.lock")
 
     errors: list[str] = []
     if package_version != project_version:
         errors.append(
             "Package version "
             f"{package_version!r} does not match pyproject version {project_version!r}"
+        )
+    if lock_version is not None and lock_version != project_version:
+        errors.append(
+            f"uv.lock version {lock_version!r} does not match project version {project_version!r}"
         )
     if project_version not in changelog_versions:
         errors.append(f"CHANGELOG.md does not contain a dated section for {project_version}")

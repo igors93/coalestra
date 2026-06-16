@@ -1,4 +1,4 @@
-.PHONY: install format format-check lint typecheck test test-count concurrency-test version-check public-api-check benchmark clean-dist build distribution-check quality release-check
+.PHONY: install format format-check lint typecheck test test-count concurrency-test version-check public-api-check release-contract-check benchmark clean-dist build distribution-check quality release-check
 
 install:
 	python -m pip install -e ".[dev]"
@@ -30,6 +30,9 @@ version-check:
 public-api-check:
 	python scripts/check_public_api.py
 
+release-contract-check:
+	python scripts/check_release_contract.py
+
 benchmark:
 	PYTHONPATH=src python benchmarks/benchmark_snapshot.py
 	PYTHONPATH=src python benchmarks/benchmark_local_sources.py
@@ -43,6 +46,6 @@ build: clean-dist version-check
 distribution-check: build
 	python scripts/verify_distribution.py
 
-quality: format-check lint typecheck version-check test-count concurrency-test test distribution-check
+quality: format-check lint typecheck version-check public-api-check release-contract-check test-count concurrency-test test distribution-check
 
 release-check: quality

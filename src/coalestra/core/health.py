@@ -39,6 +39,7 @@ class BuilderHealthReason(str, Enum):
     OBSERVABILITY_WORKER_STOPPED = "observability_worker_stopped"
     QUEUE_TIMEOUTS_INCREASED = "queue_timeouts_increased"
     SOURCE_TIMEOUTS_INCREASED = "source_timeouts_increased"
+    SOURCE_TRANSPORT_TIMEOUT_VIOLATIONS_INCREASED = "source_transport_timeout_violations_increased"
     DEADLINES_EXCEEDED_INCREASED = "deadlines_exceeded_increased"
     REVALIDATION_FAILURES_INCREASED = "revalidation_failures_increased"
     PAYLOAD_COPY_FAILURES_INCREASED = "payload_copy_failures_increased"
@@ -360,6 +361,8 @@ class BuilderHealth:
     protected_blocking_source_count: int = 0
     unsafe_blocking_source_count: int = 0
     undeclared_source_timeout_count: int = 0
+    source_transport_timeout_violation_count: int = 0
+    source_transport_timeout_violations: Mapping[str, int] = field(default_factory=dict)
     pending_submissions: int = 0
     max_pending_submissions: int | None = None
     payload_copy_components: Mapping[str, PayloadCopyHealth] = field(default_factory=dict)
@@ -388,6 +391,11 @@ class BuilderHealth:
             self,
             "source_timeout_guarantees",
             MappingProxyType(dict(self.source_timeout_guarantees)),
+        )
+        object.__setattr__(
+            self,
+            "source_transport_timeout_violations",
+            MappingProxyType(dict(self.source_transport_timeout_violations)),
         )
         object.__setattr__(
             self,
@@ -458,6 +466,8 @@ class OperationalHealthSnapshot:
     active_dispatch_workers: int
     queue_timeout_count: int
     source_timeout_count: int
+    source_transport_timeout_violation_count: int
+    source_transport_timeout_violations: Mapping[str, int]
     deadline_exceeded_count: int
     revalidation_attempt_count: int
     revalidation_failure_count: int
@@ -476,6 +486,8 @@ class OperationalHealthTracker:
         self._active_dispatch_workers = 0
         self._queue_timeout_count = 0
         self._source_timeout_count = 0
+        self._source_transport_timeout_violation_count = 0
+        self._source_transport_timeout_violations: dict[str, int] = {}
         self._deadline_exceeded_count = 0
         self._revalidation_attempt_count = 0
         self._revalidation_failure_count = 0
@@ -498,6 +510,18 @@ class OperationalHealthTracker:
         with self._lock:
             self._source_timeout_count += 1
 
+    def record_source_transport_timeout_violation(self, source: str) -> None:
+        """Record one runtime violation of a declared transport-timeout contract."""
+
+        normalized = str(source).strip()
+        if not normalized:
+            raise ValueError("source cannot be empty")
+        with self._lock:
+            self._source_transport_timeout_violation_count += 1
+            self._source_transport_timeout_violations[normalized] = (
+                self._source_transport_timeout_violations.get(normalized, 0) + 1
+            )
+
     def record_deadline_exceeded(self) -> None:
         with self._lock:
             self._deadline_exceeded_count += 1
@@ -514,6 +538,12 @@ class OperationalHealthTracker:
                 active_dispatch_workers=self._active_dispatch_workers,
                 queue_timeout_count=self._queue_timeout_count,
                 source_timeout_count=self._source_timeout_count,
+                source_transport_timeout_violation_count=(
+                    self._source_transport_timeout_violation_count
+                ),
+                source_transport_timeout_violations=MappingProxyType(
+                    dict(self._source_transport_timeout_violations)
+                ),
                 deadline_exceeded_count=self._deadline_exceeded_count,
                 revalidation_attempt_count=self._revalidation_attempt_count,
                 revalidation_failure_count=self._revalidation_failure_count,
@@ -714,6 +744,10 @@ def _assess_builder_health(
             (
                 "source_timeout_count",
                 BuilderHealthReason.SOURCE_TIMEOUTS_INCREASED,
+            ),
+            (
+                "source_transport_timeout_violation_count",
+                BuilderHealthReason.SOURCE_TRANSPORT_TIMEOUT_VIOLATIONS_INCREASED,
             ),
             (
                 "deadline_exceeded_count",

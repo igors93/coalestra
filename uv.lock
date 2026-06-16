@@ -64,7 +64,7 @@ wheels = [
 
 [[package]]
 name = "coalestra"
-version = "0.5.8"
+version = "0.6.0"
 source = { editable = "." }
 
 [package.optional-dependencies]

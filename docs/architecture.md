@@ -348,3 +348,20 @@ ResourceKey("market", "price", "BTCUSDT", {"venue": "spot"})
 ```
 
 Structured events retain the full rendered resource key for investigation. This separates aggregated monitoring from detailed diagnostics without removing context. Configured source names remain valid metric labels because the builder owns a bounded source catalog; applications should not create source names from per-resource identifiers.
+
+## 0.6 integration contract
+
+The public package exposes a versioned capability manifest so consuming applications can
+validate features and schema versions during startup. This contract is intentionally
+separate from package-version string comparisons: additive patch releases may extend the
+manifest while preserving the 0.6 API-stability identifier.
+
+Blocking-source declarations are validated before the builder starts. During execution,
+protected calls are also measured against the declared transport timeout. A call that
+returns or fails beyond the declared timeout is recorded as a contract violation. A
+Coalestra-owned source timer expiring after the smaller transport deadline is also a
+violation because the downstream transport should already have returned.
+
+The release pipeline validates the manifest from both the source tree and a clean wheel
+installation. This prevents a release where documentation, top-level exports, package
+metadata, and runtime capabilities describe different feature sets.

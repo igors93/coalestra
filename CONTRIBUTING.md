@@ -16,12 +16,12 @@ A release is accepted only when all of the following succeed:
 make release-check
 ```
 
-The release gate verifies formatting, lint, strict mypy, the test-count floor, deterministic concurrency regressions, the complete test suite, version consistency, package build, clean wheel installation, and the exact public API manifest.
+The release gate verifies formatting, lint, strict mypy, the test-count floor, deterministic concurrency regressions, the complete test suite, version and lock-file consistency, the 0.6 capability contract, package build, clean wheel installation, and the exact public API manifest.
 
 Before creating a tag:
 
-1. Update `pyproject.toml`, `src/coalestra/__init__.py`, and `CHANGELOG.md` to the same version.
-2. Update `scripts/public_api.txt` when a public export is intentionally added or removed.
+1. Update `pyproject.toml`, `src/coalestra/__init__.py`, `uv.lock`, and `CHANGELOG.md` to the same version.
+2. Update `scripts/public_api.txt` and the capability contract when a public export, schema, or stable feature is intentionally added or removed.
 3. Run `make release-check` from a clean checkout.
 4. Create a tag in the form `vX.Y.Z`. The release workflow rejects a tag that does not match the project version.
 5. Use only the wheel and source distribution produced by the verified release workflow.

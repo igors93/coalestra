@@ -2,8 +2,15 @@
 
 ## Unreleased
 
-- Added explicit timeout-safety declarations for synchronous blocking sources, including transport budgets, thread-offload validation, strict migration mode, and health diagnostics.
-- Prevented protected blocking calls from starting when the remaining snapshot/source budget cannot contain the declared transport timeout.
+## 0.6.0 - 2026-06-16
+
+- Established a versioned runtime capability contract through `capabilities()` and `require_capabilities()` for startup compatibility checks.
+- Promoted the package metadata from alpha to beta and added an explicit 0.6 API-stability identifier.
+- Made custom source timeout-safety declarations required by default while preserving an explicit migration opt-out.
+- Added runtime detection of declared transport-timeout violations, including per-source health counters, metrics, events, and severity assessment.
+- Added a release-contract gate that validates required features, schema versions, safe defaults, the public API, and the installed wheel.
+- Added migration, integration-readiness, and Alphora-specific 0.6 documentation.
+- Consolidated the 0.5.7-0.5.9 hardening work into the supported 0.6 integration baseline: temporal consistency, snapshot acceptance, bounded payload isolation, controlled shutdown, buffered observability, health serialization, and blocking-source timeout guarantees.
 
 ## 0.5.9 - 2026-06-16
 

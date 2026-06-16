@@ -298,6 +298,9 @@ def test_managed_lifecycle_closes_components() -> None:
         name = "source"
         priority = 1
         timeout_seconds = None
+        blocking_io = False
+        blocking_io_offloaded = False
+        transport_timeout_seconds = None
         closed = False
 
         def supports(self, _key: ResourceKey) -> bool:

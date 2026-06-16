@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import uuid
 from collections.abc import Awaitable, Collection, Iterable, Mapping
 from dataclasses import replace
@@ -119,8 +120,9 @@ class SnapshotBuilder:
         observability_overflow: BufferOverflowPolicy = BufferOverflowPolicy.DROP_OLDEST,
         observability_shutdown_timeout_seconds: float = 5.0,
         observability_drain_on_shutdown: bool = True,
-        require_source_timeout_declarations: bool = False,
+        require_source_timeout_declarations: bool = True,
         allow_unsafe_blocking_sources: bool = False,
+        source_transport_timeout_grace_seconds: float = 0.05,
     ) -> None:
         if authority_policy is not None and authority_resolver is not None:
             raise ValueError("authority_policy and authority_resolver cannot be provided together")
@@ -180,6 +182,14 @@ class SnapshotBuilder:
             raise TypeError("require_source_timeout_declarations must be a boolean")
         if not isinstance(allow_unsafe_blocking_sources, bool):
             raise TypeError("allow_unsafe_blocking_sources must be a boolean")
+        if isinstance(source_transport_timeout_grace_seconds, bool) or not isinstance(
+            source_transport_timeout_grace_seconds, (int, float)
+        ):
+            raise TypeError("source_transport_timeout_grace_seconds must be a number")
+        if not math.isfinite(float(source_transport_timeout_grace_seconds)):
+            raise ValueError("source_transport_timeout_grace_seconds must be finite")
+        if source_transport_timeout_grace_seconds < 0:
+            raise ValueError("source_transport_timeout_grace_seconds cannot be negative")
         if cache is not None and (
             cache_run_payload_copies_in_thread is not None or cache_max_copy_concurrency != 4
         ):
@@ -236,6 +246,7 @@ class SnapshotBuilder:
         self.manage_lifecycle = bool(manage_lifecycle)
         self.require_source_timeout_declarations = require_source_timeout_declarations
         self.allow_unsafe_blocking_sources = allow_unsafe_blocking_sources
+        self.source_transport_timeout_grace_seconds = float(source_transport_timeout_grace_seconds)
         self.max_concurrency = int(max_concurrency)
         self.max_pending_tasks = (
             self.max_concurrency if max_pending_tasks is None else int(max_pending_tasks)
@@ -294,6 +305,8 @@ class SnapshotBuilder:
             async_payload_isolator=self._async_payload_isolator,
             authority_resolver=self.authority_resolver,
             source_timeout_guarantees=self._source_catalog.timeout_guarantees,
+            health_tracker=self._health_tracker,
+            transport_timeout_grace_seconds=self.source_transport_timeout_grace_seconds,
         )
         self._source_executor = SourceExecutor(
             source_catalog=self._source_catalog,
@@ -448,6 +461,10 @@ class SnapshotBuilder:
             undeclared_source_timeout_count=sum(
                 not guarantee.declaration_present for guarantee in timeout_guarantees.values()
             ),
+            source_transport_timeout_violation_count=(
+                operational.source_transport_timeout_violation_count
+            ),
+            source_transport_timeout_violations=(operational.source_transport_timeout_violations),
             payload_copy_components=copy_components,
             active_payload_copies=sum(
                 snapshot.active_copies for snapshot in copy_components.values()

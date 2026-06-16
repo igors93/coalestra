@@ -136,6 +136,19 @@ def main() -> int:
             cwd=temporary,
             env=clean_environment,
         )
+        subprocess.run(
+            [
+                str(python),
+                str(root / "scripts" / "check_release_contract.py"),
+                "--expected-version",
+                version,
+                "--forbid-path",
+                str(root),
+            ],
+            check=True,
+            cwd=temporary,
+            env=clean_environment,
+        )
 
     print(f"Distribution verified: {wheel.name}, {sdist.name}")
     return 0

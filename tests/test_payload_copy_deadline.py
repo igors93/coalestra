@@ -348,4 +348,4 @@ def test_default_memory_cache_copy_respects_snapshot_deadline() -> None:
 def test_project_version_includes_snapshot_acceptance_release() -> None:
     import coalestra
 
-    assert coalestra.__version__ == "0.5.9"
+    assert coalestra.__version__ == "0.6.0"

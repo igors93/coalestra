@@ -17,6 +17,7 @@ from coalestra.core.errors import (
     SourceTimeoutError,
     SourceUnavailableError,
 )
+from coalestra.core.health import OperationalHealthTracker
 from coalestra.core.isolation import AsyncPayloadIsolator, PayloadIsolator
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue, SourcePayload
 from coalestra.core.protocols import (
@@ -69,6 +70,8 @@ class SourceCalls:
         async_payload_isolator: AsyncPayloadIsolator,
         authority_resolver: AuthorityPolicyResolver,
         source_timeout_guarantees: Mapping[str, SourceTimeoutGuarantee],
+        health_tracker: OperationalHealthTracker,
+        transport_timeout_grace_seconds: float,
     ) -> None:
         self.clock = clock
         self.capacity = capacity
@@ -81,6 +84,8 @@ class SourceCalls:
         self.async_payload_isolator = async_payload_isolator
         self.authority_resolver = authority_resolver
         self.source_timeout_guarantees = dict(source_timeout_guarantees)
+        self.health_tracker = health_tracker
+        self.transport_timeout_grace_seconds = float(transport_timeout_grace_seconds)
 
     async def fetch_once(
         self,
@@ -264,12 +269,20 @@ class SourceCalls:
             budget=budget,
             resource=resource,
         )
+        started_at = self.clock.monotonic()
         try:
-            return await self._await_with_timeout(
+            result = await self._await_with_timeout(
                 operation,
                 budget.seconds,
             )
         except _OperationTimedOut as error:
+            self._record_transport_timeout_violation(
+                source,
+                elapsed_seconds=max(0.0, self.clock.monotonic() - started_at),
+                resource=resource,
+                outcome="coalestra_timeout",
+                force=True,
+            )
             target = self._target_suffix(resource)
             if budget.limited_by_deadline:
                 raise SnapshotDeadlineExceededError(
@@ -279,6 +292,57 @@ class SourceCalls:
             raise SourceTimeoutError(
                 f"source {source.name} timed out after {budget.seconds:.3f}s{target}"
             ) from error
+        except BaseException:
+            self._record_transport_timeout_violation(
+                source,
+                elapsed_seconds=max(0.0, self.clock.monotonic() - started_at),
+                resource=resource,
+                outcome="failed_late",
+            )
+            raise
+
+        self._record_transport_timeout_violation(
+            source,
+            elapsed_seconds=max(0.0, self.clock.monotonic() - started_at),
+            resource=resource,
+            outcome="completed_late",
+        )
+        return result
+
+    def _record_transport_timeout_violation(
+        self,
+        source: SourceBase,
+        *,
+        elapsed_seconds: float,
+        resource: ResourceKey | None,
+        outcome: str,
+        force: bool = False,
+    ) -> None:
+        guarantee = self.source_timeout_guarantees.get(source.name)
+        if (
+            guarantee is None
+            or guarantee.status is not SourceTimeoutGuaranteeStatus.PROTECTED
+            or guarantee.transport_timeout_seconds is None
+        ):
+            return
+        threshold = guarantee.transport_timeout_seconds + self.transport_timeout_grace_seconds
+        if not force and elapsed_seconds <= threshold:
+            return
+        self.health_tracker.record_source_transport_timeout_violation(source.name)
+        self.metrics.increment(
+            "source_transport_timeout_violation_total",
+            source=source.name,
+            outcome=outcome,
+        )
+        self.events.emit(
+            "source_transport_timeout_violated",
+            source=source.name,
+            resource=str(resource) if resource is not None else "",
+            outcome=outcome,
+            declared_transport_timeout_seconds=guarantee.transport_timeout_seconds,
+            observed_elapsed_seconds=elapsed_seconds,
+            grace_seconds=self.transport_timeout_grace_seconds,
+        )
 
     def _ensure_transport_timeout_fits_budget(
         self,

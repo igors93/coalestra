@@ -1,5 +1,7 @@
 """Coalestra public API."""
 
+from collections.abc import Iterable, Mapping
+
 from coalestra.adapters import (
     CallableBatchSource,
     CallableDerivedSource,
@@ -24,6 +26,9 @@ from coalestra.core import (
     BUILDER_HEALTH_SCHEMA,
     BUILDER_HEALTH_SCHEMA_VERSION,
     CASE_INSENSITIVE_KEY_NORMALIZER,
+    COALESTRA_API_STABILITY,
+    COALESTRA_CAPABILITIES_SCHEMA,
+    COALESTRA_CAPABILITIES_SCHEMA_VERSION,
     ERROR_DIAGNOSTICS_SCHEMA,
     ERROR_DIAGNOSTICS_SCHEMA_VERSION,
     LEGACY_KEY_NORMALIZER,
@@ -48,7 +53,9 @@ from coalestra.core import (
     CacheLookup,
     CacheWriteResult,
     CacheWriteStatus,
+    CapabilityRequirementError,
     CircuitOpenError,
+    CoalestraCapabilities,
     CoalestraError,
     ConcurrencyLimitedSource,
     DependencyCycleError,
@@ -100,6 +107,7 @@ from coalestra.core import (
     SourceTimeoutGuaranteeStatus,
     SourceUnavailableError,
     SubmissionBacklogFullError,
+    build_capabilities,
     deepcopy_payload,
     inspect_source_timeout_guarantee,
 )
@@ -137,7 +145,26 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.5.9"
+__version__ = "0.6.0"
+
+
+def capabilities() -> CoalestraCapabilities:
+    """Return the immutable runtime compatibility contract for this installation."""
+
+    return build_capabilities(__version__)
+
+
+def require_capabilities(
+    *,
+    features: Iterable[str] = (),
+    schemas: Mapping[str, int] | None = None,
+) -> CoalestraCapabilities:
+    """Validate integration requirements and return the installed capabilities."""
+
+    installed = capabilities()
+    installed.require(features=features, schemas=schemas)
+    return installed
+
 
 __all__ = [
     "BUILDER_HEALTH_ASSESSMENT_SCHEMA",
@@ -145,6 +172,9 @@ __all__ = [
     "BUILDER_HEALTH_SCHEMA",
     "BUILDER_HEALTH_SCHEMA_VERSION",
     "CASE_INSENSITIVE_KEY_NORMALIZER",
+    "COALESTRA_API_STABILITY",
+    "COALESTRA_CAPABILITIES_SCHEMA",
+    "COALESTRA_CAPABILITIES_SCHEMA_VERSION",
     "ERROR_DIAGNOSTICS_SCHEMA",
     "ERROR_DIAGNOSTICS_SCHEMA_VERSION",
     "LEGACY_KEY_NORMALIZER",
@@ -178,6 +208,7 @@ __all__ = [
     "CallableBatchSource",
     "CallableDerivedSource",
     "CallableSource",
+    "CapabilityRequirementError",
     "CapacityController",
     "CapacityLimiter",
     "CapacitySnapshot",
@@ -188,6 +219,7 @@ __all__ = [
     "CircuitScope",
     "CircuitSnapshot",
     "CircuitState",
+    "CoalestraCapabilities",
     "CoalestraError",
     "ConcurrencyLimitedSource",
     "DependencyCycleError",
@@ -259,6 +291,8 @@ __all__ = [
     "SyncSnapshotBuilder",
     "SyncSnapshotSession",
     "__version__",
+    "capabilities",
     "deepcopy_payload",
     "inspect_source_timeout_guarantee",
+    "require_capabilities",
 ]

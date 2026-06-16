@@ -25,6 +25,9 @@ BuilderHealthFinding
 BuilderHealthReason
 BuilderHealthSeverity
 CASE_INSENSITIVE_KEY_NORMALIZER
+COALESTRA_API_STABILITY
+COALESTRA_CAPABILITIES_SCHEMA
+COALESTRA_CAPABILITIES_SCHEMA_VERSION
 CacheLookup
 CacheStats
 CacheWriteResult
@@ -32,6 +35,7 @@ CacheWriteStatus
 CallableBatchSource
 CallableDerivedSource
 CallableSource
+CapabilityRequirementError
 CapacityController
 CapacityLimiter
 CapacitySnapshot
@@ -42,6 +46,7 @@ CircuitOpenError
 CircuitScope
 CircuitSnapshot
 CircuitState
+CoalestraCapabilities
 CoalestraError
 ConcurrencyLimitedSource
 DependencyCycleError
@@ -117,5 +122,7 @@ SyncResourcePublisher
 SyncSnapshotBuilder
 SyncSnapshotSession
 __version__
+capabilities
 deepcopy_payload
 inspect_source_timeout_guarantee
+require_capabilities

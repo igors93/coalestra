@@ -544,3 +544,29 @@ The assessment always evaluates current state. Cumulative timeout, revalidation,
 - `run_sync_in_thread`: keep blocking callables out of the event loop, or explicitly run guaranteed non-blocking local reads inline.
 
 `CallableBatchSource` additionally accepts `max_batch_size`.
+
+## 0.6 runtime capability contract
+
+### `capabilities()`
+
+Returns an immutable `CoalestraCapabilities` object for startup compatibility checks.
+`to_dict()` uses the `coalestra.capabilities` schema and includes the installed package
+version, API-stability identifier, supported feature names, schema versions, and stable
+safety defaults.
+
+### `require_capabilities()`
+
+Validates required feature names and minimum schema versions. Missing requirements raise
+`CapabilityRequirementError` before an integration begins operational work.
+
+## Runtime transport-timeout violations
+
+Protected blocking sources are checked against their declared transport timeout after each
+call. Execution beyond the declared timeout plus
+`SnapshotBuilder.source_transport_timeout_grace_seconds` increments
+`BuilderHealth.source_transport_timeout_violation_count` and the immutable per-source
+`source_transport_timeout_violations` mapping. The health assessment evaluates increases
+against the previous health snapshot.
+
+`SnapshotBuilder.require_source_timeout_declarations` defaults to `True` in 0.6. Custom
+sources must declare their timeout-safety contract or explicitly select the legacy opt-out.

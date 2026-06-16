@@ -10,6 +10,13 @@ from coalestra.core.authority import (
     AuthorityResolver,
     SourceAuthorityPolicy,
 )
+from coalestra.core.capabilities import (
+    COALESTRA_API_STABILITY,
+    COALESTRA_CAPABILITIES_SCHEMA,
+    COALESTRA_CAPABILITIES_SCHEMA_VERSION,
+    CoalestraCapabilities,
+    build_capabilities,
+)
 from coalestra.core.clock import SystemClock
 from coalestra.core.consistency import SnapshotConsistencyPolicy
 from coalestra.core.diagnostic_schema import (
@@ -21,6 +28,7 @@ from coalestra.core.diagnostic_schema import (
 )
 from coalestra.core.diagnostics import DiagnosticsCollector, SnapshotDiagnostics
 from coalestra.core.errors import (
+    CapabilityRequirementError,
     CircuitOpenError,
     CoalestraError,
     DependencyCycleError,
@@ -110,6 +118,9 @@ __all__ = [
     "BUILDER_HEALTH_SCHEMA",
     "BUILDER_HEALTH_SCHEMA_VERSION",
     "CASE_INSENSITIVE_KEY_NORMALIZER",
+    "COALESTRA_API_STABILITY",
+    "COALESTRA_CAPABILITIES_SCHEMA",
+    "COALESTRA_CAPABILITIES_SCHEMA_VERSION",
     "ERROR_DIAGNOSTICS_SCHEMA",
     "ERROR_DIAGNOSTICS_SCHEMA_VERSION",
     "LEGACY_KEY_NORMALIZER",
@@ -134,8 +145,10 @@ __all__ = [
     "CacheLookup",
     "CacheWriteResult",
     "CacheWriteStatus",
+    "CapabilityRequirementError",
     "CircuitOpenError",
     "Clock",
+    "CoalestraCapabilities",
     "CoalestraError",
     "ConcurrencyLimitedSource",
     "DependencyCycleError",
@@ -193,6 +206,7 @@ __all__ = [
     "SourceUnavailableError",
     "SubmissionBacklogFullError",
     "SystemClock",
+    "build_capabilities",
     "deepcopy_payload",
     "inspect_source_timeout_guarantee",
 ]
