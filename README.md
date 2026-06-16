@@ -246,22 +246,33 @@ Diagnostics include requested, resolved and failed resource counts; cache hits/m
 
 ## Buffered observability
 
-Wrap a potentially slow sink so logging or metrics export does not run on the acquisition path:
+`SnapshotBuilder` automatically protects the acquisition path from unknown external metrics and event sinks. Sinks that do not declare themselves non-blocking are wrapped in bounded worker-thread buffers by default:
+
+```python
+from coalestra import BufferOverflowPolicy, SnapshotBuilder
+
+builder = SnapshotBuilder(
+    sources,
+    events=file_event_sink,
+    metrics=prometheus_adapter,
+    observability_max_pending=10_000,
+    observability_overflow=BufferOverflowPolicy.DROP_OLDEST,
+    observability_shutdown_timeout_seconds=5.0,
+)
+```
+
+The automatic mode is `buffer_observability=None`. Built-in `NullEventSink`, `NullMetrics`, and `InMemoryMetrics` remain inline because they are known to be non-blocking. Existing `BufferedEventSink` and `BufferedMetricsSink` instances are not wrapped again. Set `buffer_observability=True` to force buffering or `False` to preserve direct synchronous sink calls.
+
+The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution. Builder-owned buffers are drained before managed downstream sinks are closed. `ObservabilityShutdownTimeoutError` reports a buffer that cannot stop within the configured shutdown budget.
+
+Standalone buffering remains available when a sink is used outside a builder:
 
 ```python
 from coalestra import BufferedEventSink, BufferedMetricsSink
 
 events = BufferedEventSink(file_event_sink, max_pending=10_000)
 metrics = BufferedMetricsSink(prometheus_adapter, max_pending=10_000)
-
-builder = SnapshotBuilder(sources, events=events, metrics=metrics)
-
-# During shutdown
-events.close()
-metrics.close()
 ```
-
-The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution.
 
 ### Low-cardinality metric labels
 
@@ -582,6 +593,8 @@ await builder.aclose()
 ```
 
 Standalone `AsyncMemoryCache` and `ResourcePublisher` instances close their owned copy runners through `aclose()`. Builder-created publishers share the builder runner and do not close it independently. The synchronous facade defers stopping its event loop after a shutdown timeout until late copy workers have actually finished.
+
+Observability-buffer health is also exposed through `health.observability_buffers`, with fixed `metrics` and `events` component names when buffering is active. Aggregates include `observability_pending`, `observability_peak_pending`, `observability_dropped_count`, `observability_failure_count`, `observability_shutdown_incomplete`, and `observability_shutdown_timeout_count`. These counters make downstream congestion visible without placing sink I/O back on the acquisition path.
 
 `sync_builder.health_snapshot()` adds `pending_submissions` and `max_pending_submissions` from the synchronous non-blocking publication backlog. Counters are process-local and cumulative since builder creation. The snapshot intentionally exposes aggregates only; it does not include symbols, subjects, qualifiers, or business decisions.
 

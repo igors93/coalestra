@@ -266,6 +266,7 @@ Additional event types include:
 - `CircuitOpenError`
 - `DependencyCycleError`
 - `DependencyResolutionError`
+- `ObservabilityShutdownTimeoutError`
 - `PayloadCopySubsystemClosedError`
 - `PayloadCopyShutdownTimeoutError`
 - `PayloadIsolationError`
@@ -439,6 +440,12 @@ Standalone `ResourcePublisher` instances accept the same two options. Builder-cr
 
 `AsyncMemoryCache.aclose_payload_copies()` and `AsyncMemoryCache.aclose()` drain the cache-owned runner. A standalone `ResourcePublisher.aclose()` drains its runner; publishers created by `SnapshotBuilder` share the builder runner and therefore do not own its lifecycle.
 
+### Automatic observability buffering
+
+`SnapshotBuilder` accepts `buffer_observability`, `observability_max_pending`, `observability_overflow`, `observability_shutdown_timeout_seconds`, and `observability_drain_on_shutdown`. The default `None` mode buffers external sinks unless they declare `coalestra_non_blocking = True`. Passing `True` forces buffering for non-buffered sinks, while `False` preserves direct synchronous calls. Existing `BufferedEventSink` and `BufferedMetricsSink` instances are reused without another wrapper.
+
+The builder always owns and closes wrappers it creates. With `manage_lifecycle=True`, queued records are drained before the original downstream event and metrics sinks are closed. A timeout raises `ObservabilityShutdownTimeoutError` with component-level pending counts. `await builder.wait_for_observability_shutdown()` completes a previously timed-out drain. Buffer statistics are exposed through `BuilderHealth` and include queue capacity, current and peak pending work, delivered and dropped records, downstream failures, worker state, and shutdown timeouts.
+
 ### `ObservationPolicy`
 
 Controls tolerance and rejection of source or published timestamps that are ahead of the local clock.
@@ -458,7 +465,14 @@ Returned by `await builder.health_snapshot()` and `sync_builder.health_snapshot(
 - `max_pending_submissions`: synchronous backlog limit, or `None` on the asynchronous builder.
 - `payload_copy_shutdown_incomplete`: whether any copy component most recently exceeded its shutdown budget and has not yet drained;
 - `payload_copy_shutdown_timeout_count`: cumulative component shutdown timeouts;
-- `payload_copy_active_at_last_shutdown_timeout`: aggregate active workers recorded at the latest component timeouts.
+- `payload_copy_active_at_last_shutdown_timeout`: aggregate active workers recorded at the latest component timeouts;
+- `observability_buffers`: immutable per-component `BufferedSinkStats` for active metrics and event buffers;
+- `observability_pending`: records currently queued or being delivered;
+- `observability_peak_pending`: aggregate peak pending records since builder creation;
+- `observability_dropped_count`: cumulative overflow or shutdown discards;
+- `observability_failure_count`: cumulative downstream delivery failures;
+- `observability_shutdown_incomplete`: whether an owned buffer remains alive after shutdown;
+- `observability_shutdown_timeout_count`: cumulative buffer shutdown timeouts.
 
 Current-state fields are point-in-time observations. Counter fields are process-local and cumulative since builder creation. `SyncSnapshotBuilder.health_snapshot()` overlays its thread-safe submission backlog state onto the underlying builder health snapshot.
 

@@ -15,6 +15,8 @@ class ObservationSummary:
 
 
 class NullMetrics:
+    coalestra_non_blocking = True
+
     def increment(self, metric: str, value: int = 1, **labels: str) -> None:
         return None
 
@@ -23,6 +25,8 @@ class NullMetrics:
 
 
 class InMemoryMetrics:
+    coalestra_non_blocking = True
+
     """Dependency-free metrics sink suitable for tests and local diagnostics."""
 
     def __init__(self) -> None:

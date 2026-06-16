@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Used a high-resolution integer timer for payload-copy health durations so completed work is never reported as zero-duration on coarse timer platforms.
-- Replaced a wall-clock-sensitive session deadline regression with a deterministic manual clock.
-
 ## 0.5.8 - 2026-06-15
 
+- Automatically buffered external metrics and event sinks so slow downstream I/O cannot block snapshot acquisition by default.
+- Added bounded overflow, delivery-failure, pending-work, peak-queue, and shutdown diagnostics for builder-managed observability buffers.
+- Added explicit opt-out and force-buffer controls while preserving direct execution for known non-blocking built-in sinks and avoiding double buffering.
+- Added controlled observability draining before managed downstream lifecycle shutdown, including `ObservabilityShutdownTimeoutError` and synchronous-facade late-worker handling.
 - Added bounded asynchronous payload-copy execution across cache, source, publisher, derived, and session boundaries.
 - Included payload-copy capacity waits and execution time in the absolute snapshot deadline.
 - Added `PayloadCopyHealth` and exposed current copy activity, saturation, cumulative outcomes, timeouts, and latency summaries through `BuilderHealth`.

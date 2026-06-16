@@ -14,6 +14,7 @@ from coalestra.core.authority import AuthorityPolicyResolver, SourceAuthorityPol
 from coalestra.core.clock import SystemClock
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.errors import (
+    ObservabilityShutdownTimeoutError,
     PayloadCopyShutdownTimeoutError,
     ResourceResolutionError,
     SnapshotBuildError,
@@ -39,6 +40,12 @@ from coalestra.core.models import (
 from coalestra.core.protocols import AsyncCache, Clock, EventSink, MetricsSink, Source
 from coalestra.core.quality import ObservationPolicy
 from coalestra.core.request import SnapshotRequest
+from coalestra.observability.buffered import (
+    BufferedEventSink,
+    BufferedMetricsSink,
+    BufferedSinkStats,
+    BufferOverflowPolicy,
+)
 from coalestra.observability.events import NullEventSink
 from coalestra.observability.labels import resource_metric_labels
 from coalestra.observability.metrics import NullMetrics
@@ -106,6 +113,11 @@ class SnapshotBuilder:
         cache_run_payload_copies_in_thread: bool | None = None,
         cache_max_copy_concurrency: int = 4,
         copy_shutdown_timeout_seconds: float = 5.0,
+        buffer_observability: bool | None = None,
+        observability_max_pending: int = 10_000,
+        observability_overflow: BufferOverflowPolicy = BufferOverflowPolicy.DROP_OLDEST,
+        observability_shutdown_timeout_seconds: float = 5.0,
+        observability_drain_on_shutdown: bool = True,
     ) -> None:
         if authority_policy is not None and authority_resolver is not None:
             raise ValueError("authority_policy and authority_resolver cannot be provided together")
@@ -143,6 +155,24 @@ class SnapshotBuilder:
             raise TypeError("copy_shutdown_timeout_seconds must be a number")
         if copy_shutdown_timeout_seconds <= 0:
             raise ValueError("copy_shutdown_timeout_seconds must be positive")
+        if buffer_observability is not None and not isinstance(buffer_observability, bool):
+            raise TypeError("buffer_observability must be a boolean or None")
+        if isinstance(observability_max_pending, bool) or not isinstance(
+            observability_max_pending, int
+        ):
+            raise TypeError("observability_max_pending must be an integer")
+        if observability_max_pending < 1:
+            raise ValueError("observability_max_pending must be at least 1")
+        if not isinstance(observability_overflow, BufferOverflowPolicy):
+            raise TypeError("observability_overflow must be a BufferOverflowPolicy")
+        if isinstance(observability_shutdown_timeout_seconds, bool) or not isinstance(
+            observability_shutdown_timeout_seconds, (int, float)
+        ):
+            raise TypeError("observability_shutdown_timeout_seconds must be a number")
+        if observability_shutdown_timeout_seconds <= 0:
+            raise ValueError("observability_shutdown_timeout_seconds must be positive")
+        if not isinstance(observability_drain_on_shutdown, bool):
+            raise TypeError("observability_drain_on_shutdown must be a boolean")
         if cache is not None and (
             cache_run_payload_copies_in_thread is not None or cache_max_copy_concurrency != 4
         ):
@@ -184,8 +214,15 @@ class SnapshotBuilder:
             default_source_resilience,
             overrides=source_resilience,
         )
-        self.metrics = metrics or NullMetrics()
-        self.events = events or NullEventSink()
+        self._metrics_downstream = metrics or NullMetrics()
+        self._events_downstream = events or NullEventSink()
+        self.buffer_observability = buffer_observability
+        self.observability_max_pending = int(observability_max_pending)
+        self.observability_overflow = observability_overflow
+        self.observability_shutdown_timeout_seconds = float(observability_shutdown_timeout_seconds)
+        self.observability_drain_on_shutdown = observability_drain_on_shutdown
+        self._owned_observability_buffers: dict[str, BufferedEventSink | BufferedMetricsSink] = {}
+        self._observability_downstreams_closed = False
         self.observation_policy = observation_policy or ObservationPolicy()
         self.cache_source_support = bool(cache_source_support)
         self.source_support_cache_max_entries = source_support_cache_max_entries
@@ -207,6 +244,13 @@ class SnapshotBuilder:
         self._source_kinds = self._source_catalog.kinds
         self._source_support_cache = self._source_catalog.support_cache
 
+        if self.authority_resolver.has_rules and not bool(
+            getattr(self.cache, "validates_source_authority", False)
+        ):
+            raise ValueError(
+                "authority policies require a cache that declares validates_source_authority = True"
+            )
+
         self.capacity = CapacityController(
             global_limit=self.max_concurrency,
             source_limits=source_concurrency,
@@ -215,6 +259,9 @@ class SnapshotBuilder:
             declared_limit = getattr(source, "max_concurrency", None)
             if self.capacity.limit_for(source.name) is None:
                 self.capacity.register_source(source.name, declared_limit)
+
+        self.metrics = self._configure_metrics_sink(self._metrics_downstream)
+        self.events = self._configure_event_sink(self._events_downstream)
 
         self._cache_access = CacheAccess(
             cache=self.cache,
@@ -268,6 +315,49 @@ class SnapshotBuilder:
             health_tracker=self._health_tracker,
         )
 
+    def _configure_metrics_sink(self, sink: MetricsSink) -> MetricsSink:
+        if not self._should_buffer_observability_sink(sink):
+            return sink
+        buffered = BufferedMetricsSink(
+            sink,
+            max_pending=self.observability_max_pending,
+            overflow=self.observability_overflow,
+        )
+        self._owned_observability_buffers["metrics"] = buffered
+        return buffered
+
+    def _configure_event_sink(self, sink: EventSink) -> EventSink:
+        if not self._should_buffer_observability_sink(sink):
+            return sink
+        buffered = BufferedEventSink(
+            sink,
+            max_pending=self.observability_max_pending,
+            overflow=self.observability_overflow,
+        )
+        self._owned_observability_buffers["events"] = buffered
+        return buffered
+
+    def _should_buffer_observability_sink(self, sink: object) -> bool:
+        if isinstance(sink, (BufferedEventSink, BufferedMetricsSink)):
+            return False
+        if self.buffer_observability is not None:
+            return self.buffer_observability
+        return not bool(getattr(sink, "coalestra_non_blocking", False))
+
+    def _observability_buffer_stats(self) -> dict[str, BufferedSinkStats]:
+        components: dict[str, BufferedSinkStats] = {}
+        for name, sink in (("metrics", self.metrics), ("events", self.events)):
+            if not bool(getattr(sink, "exposes_observability_buffer_health", False)):
+                continue
+            stats = getattr(sink, "stats", None)
+            if not callable(stats):
+                continue
+            snapshot = stats()
+            if not isinstance(snapshot, BufferedSinkStats):
+                raise TypeError("buffered observability stats must return BufferedSinkStats")
+            components[name] = snapshot
+        return components
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -312,6 +402,7 @@ class SnapshotBuilder:
                 raise TypeError("copy_health_snapshot must return PayloadCopyHealth")
             copy_components["cache"] = cache_copy_health
 
+        observability_buffers = self._observability_buffer_stats()
         capacity = await self.capacity.snapshot()
         operational = self._health_tracker.snapshot()
         return BuilderHealth(
@@ -360,6 +451,26 @@ class SnapshotBuilder:
             payload_copy_active_at_last_shutdown_timeout=sum(
                 snapshot.active_at_last_shutdown_timeout for snapshot in copy_components.values()
             ),
+            observability_buffers=observability_buffers,
+            observability_pending=sum(
+                snapshot.pending for snapshot in observability_buffers.values()
+            ),
+            observability_peak_pending=sum(
+                snapshot.peak_pending for snapshot in observability_buffers.values()
+            ),
+            observability_dropped_count=sum(
+                snapshot.dropped for snapshot in observability_buffers.values()
+            ),
+            observability_failure_count=sum(
+                snapshot.failures for snapshot in observability_buffers.values()
+            ),
+            observability_shutdown_incomplete=any(
+                snapshot.closed and snapshot.worker_alive
+                for snapshot in observability_buffers.values()
+            ),
+            observability_shutdown_timeout_count=sum(
+                snapshot.shutdown_timeout_count for snapshot in observability_buffers.values()
+            ),
         )
 
     async def wait_for_refreshes(self) -> None:
@@ -372,8 +483,9 @@ class SnapshotBuilder:
         *,
         cancel_refreshes: bool = False,
         copy_shutdown_timeout_seconds: float | None = None,
+        observability_shutdown_timeout_seconds: float | None = None,
     ) -> None:
-        """Close the builder and drain tracked payload-copy workers within one budget."""
+        """Close the builder and drain owned background subsystems within their budgets."""
 
         if copy_shutdown_timeout_seconds is not None:
             if isinstance(copy_shutdown_timeout_seconds, bool) or not isinstance(
@@ -386,6 +498,17 @@ class SnapshotBuilder:
         else:
             resolved_copy_timeout = self.copy_shutdown_timeout_seconds
 
+        if observability_shutdown_timeout_seconds is not None:
+            if isinstance(observability_shutdown_timeout_seconds, bool) or not isinstance(
+                observability_shutdown_timeout_seconds, (int, float)
+            ):
+                raise TypeError("observability_shutdown_timeout_seconds must be a number or None")
+            if observability_shutdown_timeout_seconds <= 0:
+                raise ValueError("observability_shutdown_timeout_seconds must be positive or None")
+            resolved_observability_timeout = float(observability_shutdown_timeout_seconds)
+        else:
+            resolved_observability_timeout = self.observability_shutdown_timeout_seconds
+
         if self._closed:
             return
         self._closing = True
@@ -394,6 +517,8 @@ class SnapshotBuilder:
         refresh_error: BaseException | None = None
         copy_error: BaseException | None = None
         lifecycle_error: BaseException | None = None
+        observability_error: BaseException | None = None
+        downstream_error: BaseException | None = None
         try:
             try:
                 await self._refresh_manager.close(cancel=cancel_refreshes)
@@ -408,7 +533,6 @@ class SnapshotBuilder:
                 copy_error = error
 
             if self.manage_lifecycle:
-                components: tuple[object, ...]
                 cache_lifecycle_handled = bool(
                     getattr(
                         self.cache,
@@ -416,14 +540,29 @@ class SnapshotBuilder:
                         False,
                     )
                 ) and (self._owns_cache or self.manage_lifecycle)
+                components: tuple[object, ...]
                 if cache_lifecycle_handled:
-                    components = (*self.sources, self.events, self.metrics)
+                    components = tuple(self.sources)
                 else:
-                    components = (*self.sources, self.cache, self.events, self.metrics)
+                    components = (*self.sources, self.cache)
                 try:
                     await close_components(components)
                 except BaseException as error:
                     lifecycle_error = error
+
+            try:
+                await self._close_owned_observability_buffers(
+                    timeout_seconds=resolved_observability_timeout,
+                    drain=self.observability_drain_on_shutdown,
+                )
+            except BaseException as error:
+                observability_error = error
+
+            if self.manage_lifecycle and observability_error is None:
+                try:
+                    await self._close_observability_downstreams()
+                except BaseException as error:
+                    downstream_error = error
         finally:
             self._closing = False
 
@@ -431,13 +570,88 @@ class SnapshotBuilder:
             raise copy_error
         if refresh_error is not None:
             raise refresh_error
+        if observability_error is not None:
+            raise observability_error
         if lifecycle_error is not None:
             raise lifecycle_error
+        if downstream_error is not None:
+            raise downstream_error
 
     async def wait_for_payload_copy_shutdown(self) -> None:
         """Wait without a deadline for copy workers after a timed-out close attempt."""
 
         await self._close_payload_copy_components(timeout_seconds=None)
+
+    async def wait_for_observability_shutdown(self) -> None:
+        """Wait without a deadline for builder-owned observability buffers to stop."""
+
+        await self._close_owned_observability_buffers(
+            timeout_seconds=None,
+            drain=self.observability_drain_on_shutdown,
+        )
+        if self.manage_lifecycle:
+            await self._close_observability_downstreams()
+
+    async def wait_for_background_shutdown(self) -> None:
+        """Wait for late copy and observability workers after a timed-out close."""
+
+        results = await asyncio.gather(
+            self.wait_for_payload_copy_shutdown(),
+            self.wait_for_observability_shutdown(),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    async def _close_owned_observability_buffers(
+        self,
+        *,
+        timeout_seconds: float | None,
+        drain: bool,
+    ) -> None:
+        if not self._owned_observability_buffers:
+            return
+
+        async def close_one(
+            sink: BufferedEventSink | BufferedMetricsSink,
+        ) -> bool:
+            return await asyncio.to_thread(
+                sink.close,
+                timeout=timeout_seconds,
+                drain=drain,
+            )
+
+        items = tuple(self._owned_observability_buffers.items())
+        results = await asyncio.gather(
+            *(close_one(sink) for _name, sink in items),
+            return_exceptions=True,
+        )
+        incomplete: dict[str, int] = {}
+        unexpected: BaseException | None = None
+        for (name, sink), result in zip(items, results, strict=True):
+            if isinstance(result, BaseException):
+                if unexpected is None:
+                    unexpected = result
+                continue
+            if not result:
+                stats = sink.stats()
+                incomplete[name] = stats.pending
+
+        if incomplete:
+            assert timeout_seconds is not None
+            raise ObservabilityShutdownTimeoutError(
+                timeout_seconds=timeout_seconds,
+                pending_components=incomplete,
+            )
+        if unexpected is not None:
+            raise unexpected
+
+    async def _close_observability_downstreams(self) -> None:
+        if self._observability_downstreams_closed:
+            return
+        await close_components((self._events_downstream, self._metrics_downstream))
+        self._observability_downstreams_closed = True
 
     async def _close_payload_copy_components(
         self,

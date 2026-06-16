@@ -109,6 +109,28 @@ class PayloadCopyShutdownTimeoutError(CoalestraError):
         )
 
 
+class ObservabilityShutdownTimeoutError(CoalestraError):
+    """Raised when builder-owned observability buffers do not stop in time."""
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        pending_components: Mapping[str, int],
+    ) -> None:
+        self.timeout_seconds = float(timeout_seconds)
+        self.pending_components = dict(pending_components)
+        self.pending_records = sum(max(0, int(value)) for value in self.pending_components.values())
+        rendered = (
+            ", ".join(f"{name}={count}" for name, count in sorted(self.pending_components.items()))
+            or "none"
+        )
+        super().__init__(
+            "Observability buffers did not stop within "
+            f"{self.timeout_seconds:.3f}s (pending: {rendered})"
+        )
+
+
 class SourceProtocolError(CoalestraError):
     """Raised when a source violates one of Coalestra's source contracts."""
 

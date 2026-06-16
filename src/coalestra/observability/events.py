@@ -5,6 +5,8 @@ from typing import Any
 
 
 class NullEventSink:
+    coalestra_non_blocking = True
+
     def emit(self, event_type: str, **payload: Any) -> None:
         return None
 

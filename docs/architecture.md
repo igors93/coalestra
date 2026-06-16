@@ -317,17 +317,20 @@ Completed futures release their backlog slots regardless of success, failure, or
 
 ## Buffered observability model
 
-Buffered sinks preserve the synchronous `EventSink` and `MetricsSink` protocols while moving downstream delivery to a dedicated thread.
+Buffered sinks preserve the synchronous `EventSink` and `MetricsSink` protocols while moving downstream delivery to dedicated worker threads. `SnapshotBuilder` applies this protection automatically to external sinks that do not declare `coalestra_non_blocking = True`. Built-in null and in-memory sinks remain inline, and an already-buffered sink is never wrapped twice.
 
 ```text
 acquisition task
       |
-      | non-blocking enqueue
+      | bounded non-blocking enqueue
       v
-bounded queue -> worker thread -> downstream sink
+metrics queue -> metrics worker -> downstream metrics sink
+events queue  -> events worker  -> downstream event sink
 ```
 
-The queue is bounded to prevent observability from becoming an unbounded memory leak. Overflow behavior is explicit and measurable. Downstream exceptions are counted by the buffer and never re-enter acquisition control flow.
+Each queue is bounded to prevent observability from becoming an unbounded memory leak. Overflow behavior is explicit and measurable. The default `DROP_OLDEST` policy keeps acquisition moving under sustained sink congestion. Downstream exceptions are counted by the buffer and never re-enter acquisition control flow.
+
+Builder-owned buffers are lifecycle components even when `manage_lifecycle=False`: the builder always stops the worker threads it created. With managed lifecycle enabled, buffers drain before the underlying sinks are closed. A timeout leaves the downstream open while the active delivery finishes and raises `ObservabilityShutdownTimeoutError`; the synchronous facade keeps its private event loop alive long enough to complete the deferred shutdown sequence.
 
 ## Metric cardinality boundary
 

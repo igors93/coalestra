@@ -50,6 +50,7 @@ LoggingEventSink
 MetricRecord
 NullEventSink
 NullMetrics
+ObservabilityShutdownTimeoutError
 ObservationPolicy
 PRESERVE_KEY_NORMALIZER
 PayloadCopier

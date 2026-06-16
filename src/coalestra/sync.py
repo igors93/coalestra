@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 from coalestra.cache.publisher import PublishResult, ResourcePublisher, ResourceUpdate
 from coalestra.core.consistency import SnapshotConsistencyPolicy
 from coalestra.core.errors import (
+    ObservabilityShutdownTimeoutError,
     PayloadCopyShutdownTimeoutError,
     SubmissionBacklogFullError,
 )
@@ -444,6 +445,7 @@ class SyncSnapshotBuilder:
                     self._submit_during_close(
                         self.builder.aclose(
                             copy_shutdown_timeout_seconds=self._shutdown_timeout_seconds,
+                            observability_shutdown_timeout_seconds=self._shutdown_timeout_seconds,
                         )
                     )
                 else:
@@ -452,10 +454,10 @@ class SyncSnapshotBuilder:
                 close_error = error
                 if self._close_builder and isinstance(
                     error,
-                    PayloadCopyShutdownTimeoutError,
+                    (PayloadCopyShutdownTimeoutError, ObservabilityShutdownTimeoutError),
                 ):
                     asyncio.run_coroutine_threadsafe(
-                        self._stop_loop_after_payload_copies(),
+                        self._stop_loop_after_background_workers(),
                         self._loop,
                     )
                     deferred_loop_stop = True
@@ -552,9 +554,9 @@ class SyncSnapshotBuilder:
             future.cancel()
             raise
 
-    async def _stop_loop_after_payload_copies(self) -> None:
+    async def _stop_loop_after_background_workers(self) -> None:
         try:
-            await self.builder.wait_for_payload_copy_shutdown()
+            await self.builder.wait_for_background_shutdown()
         except BaseException:
             pass
         finally:

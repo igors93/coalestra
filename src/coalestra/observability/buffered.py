@@ -23,12 +23,18 @@ class BufferOverflowPolicy(str, Enum):
 
 @dataclass(frozen=True)
 class BufferedSinkStats:
+    """Immutable activity and lifecycle state for one observability buffer."""
+
     enqueued: int
     delivered: int
     dropped: int
     failures: int
     pending: int
     closed: bool
+    max_pending: int = 0
+    peak_pending: int = 0
+    worker_alive: bool = False
+    shutdown_timeout_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -56,8 +62,11 @@ class _BufferedDispatcher(Generic[T]):
     ) -> None:
         if max_pending < 1:
             raise ValueError("max_pending must be at least 1")
+        if not isinstance(overflow, BufferOverflowPolicy):
+            raise TypeError("overflow must be a BufferOverflowPolicy")
         self._handler = handler
         self._overflow = overflow
+        self._max_pending = int(max_pending)
         self._queue: queue.Queue[T | object] = queue.Queue(maxsize=max_pending)
         self._condition = threading.Condition()
         self._enqueued = 0
@@ -65,7 +74,10 @@ class _BufferedDispatcher(Generic[T]):
         self._dropped = 0
         self._failures = 0
         self._pending = 0
+        self._peak_pending = 0
         self._closed = False
+        self._sentinel_enqueued = False
+        self._shutdown_timeout_count = 0
         self._thread = threading.Thread(target=self._run, name=thread_name, daemon=True)
         self._thread.start()
 
@@ -96,10 +108,11 @@ class _BufferedDispatcher(Generic[T]):
                 self._queue.put_nowait(record)
             self._enqueued += 1
             self._pending += 1
+            self._peak_pending = max(self._peak_pending, self._pending)
             return True
 
     def flush(self, timeout: float | None = None) -> bool:
-        """Wait for queued records. Return ``False`` when ``timeout`` expires."""
+        """Wait for queued and active records, returning ``False`` on timeout."""
 
         if timeout is not None and timeout < 0:
             raise ValueError("timeout cannot be negative")
@@ -116,16 +129,30 @@ class _BufferedDispatcher(Generic[T]):
         return True
 
     def close(self, *, timeout: float | None = 5.0, drain: bool = True) -> bool:
+        """Stop submissions and drain work within one total timeout budget."""
+
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout cannot be negative")
+        if not isinstance(drain, bool):
+            raise TypeError("drain must be a boolean")
+
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._condition:
-            if self._closed:
-                return self._pending == 0
+            first_close = not self._closed
             self._closed = True
-        drained = self.flush(timeout) if drain else False
-        if not drain or not drained:
-            self._discard_pending()
-        self._enqueue_sentinel()
-        self._thread.join(timeout=timeout)
-        return drained and not self._thread.is_alive()
+
+        drained = self.flush(self._remaining(deadline)) if drain else False
+        if first_close:
+            if not drain or not drained:
+                self._discard_pending()
+            self._enqueue_sentinel()
+
+        self._thread.join(timeout=self._remaining(deadline))
+        stopped = not self._thread.is_alive()
+        if not stopped:
+            with self._condition:
+                self._shutdown_timeout_count += 1
+        return stopped
 
     def stats(self) -> BufferedSinkStats:
         with self._condition:
@@ -136,9 +163,24 @@ class _BufferedDispatcher(Generic[T]):
                 failures=self._failures,
                 pending=self._pending,
                 closed=self._closed,
+                max_pending=self._max_pending,
+                peak_pending=self._peak_pending,
+                worker_alive=self._thread.is_alive(),
+                shutdown_timeout_count=self._shutdown_timeout_count,
             )
 
+    @staticmethod
+    def _remaining(deadline: float | None) -> float | None:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
     def _enqueue_sentinel(self) -> None:
+        with self._condition:
+            if self._sentinel_enqueued:
+                return
+            self._sentinel_enqueued = True
+
         while True:
             try:
                 self._queue.put_nowait(_SENTINEL)
@@ -196,6 +238,9 @@ class _BufferedDispatcher(Generic[T]):
 class BufferedEventSink:
     """Non-blocking event sink that delivers records on a dedicated worker thread."""
 
+    coalestra_non_blocking = True
+    exposes_observability_buffer_health = True
+
     def __init__(
         self,
         downstream: EventSink,
@@ -235,6 +280,9 @@ class BufferedEventSink:
 
 class BufferedMetricsSink:
     """Non-blocking metrics sink that delivers updates on a worker thread."""
+
+    coalestra_non_blocking = True
+    exposes_observability_buffer_health = True
 
     def __init__(
         self,

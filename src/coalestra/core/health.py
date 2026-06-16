@@ -203,6 +203,13 @@ class BuilderHealth:
     payload_copy_shutdown_incomplete: bool = False
     payload_copy_shutdown_timeout_count: int = 0
     payload_copy_active_at_last_shutdown_timeout: int = 0
+    observability_buffers: Mapping[str, Any] = field(default_factory=dict)
+    observability_pending: int = 0
+    observability_peak_pending: int = 0
+    observability_dropped_count: int = 0
+    observability_failure_count: int = 0
+    observability_shutdown_incomplete: bool = False
+    observability_shutdown_timeout_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "capacity", MappingProxyType(dict(self.capacity)))
@@ -211,6 +218,11 @@ class BuilderHealth:
             self,
             "payload_copy_components",
             MappingProxyType(dict(self.payload_copy_components)),
+        )
+        object.__setattr__(
+            self,
+            "observability_buffers",
+            MappingProxyType(dict(self.observability_buffers)),
         )
 
 
