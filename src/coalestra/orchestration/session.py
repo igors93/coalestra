@@ -10,9 +10,11 @@ from coalestra.core.consistency import (
     find_observation_skew_violation,
 )
 from coalestra.core.errors import (
+    ResourceResolutionError,
     SessionClosedError,
     SnapshotBuildError,
     SnapshotConsistencyError,
+    SnapshotDeadlineExceededError,
 )
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue
 from coalestra.core.request import SnapshotRequest
@@ -82,39 +84,56 @@ class SnapshotSession:
             requested = self._normalize_keys(keys)
             self._runtime.diagnostics.record_requested(requested)
 
+            candidate_resources = dict(self._resources)
+            candidate_errors = dict(self._errors)
             if retry_errors:
                 for key in requested:
-                    self._errors.pop(key, None)
+                    candidate_errors.pop(key, None)
 
             pending = [
-                key for key in requested if key not in self._resources and key not in self._errors
+                key
+                for key in requested
+                if key not in candidate_resources and key not in candidate_errors
             ]
-            if pending:
-                values, errors = await self._builder._resolve_many(
-                    pending,
-                    context=self._context,
-                    runtime=self._runtime,
-                )
-                self._resources.update(values)
-                self._errors.update(errors)
+            try:
+                if pending:
+                    values, errors = await self._builder._resolve_many(
+                        pending,
+                        context=self._context,
+                        runtime=self._runtime,
+                    )
+                    candidate_resources.update(values)
+                    candidate_errors.update(errors)
 
-            requested_errors = {key: self._errors[key] for key in requested if key in self._errors}
-            self._builder.metrics.increment(
-                "snapshot_session_resolve_total",
-                status="error" if requested_errors else "success",
-            )
-            self._builder.events.emit(
-                "snapshot_session_resolved",
-                snapshot_id=self.snapshot_id,
-                requested=len(requested),
-                resolved=sum(1 for key in requested if key in self._resources),
-                failed=len(requested_errors),
-                total_resources=len(self._resources),
+                requested_errors = {
+                    key: candidate_errors[key] for key in requested if key in candidate_errors
+                }
+                snapshot = await self._snapshot_state_async(
+                    candidate_resources,
+                    candidate_errors,
+                    enforce_deadline=not self._errors_include_deadline(requested_errors),
+                )
+            except SnapshotDeadlineExceededError as error:
+                self._record_copy_deadline(phase="session_resolve")
+                deadline_errors = dict.fromkeys(requested, error)
+                self._record_resolve(
+                    requested=requested,
+                    requested_errors=deadline_errors,
+                    total_resources=len(candidate_resources),
+                    strict=strict,
+                    retry_errors=retry_errors,
+                )
+                raise SnapshotBuildError(deadline_errors) from error
+
+            self._resources = candidate_resources
+            self._errors = candidate_errors
+            self._record_resolve(
+                requested=requested,
+                requested_errors=requested_errors,
+                total_resources=len(candidate_resources),
                 strict=strict,
                 retry_errors=retry_errors,
             )
-
-            snapshot = await self._snapshot_with_errors_async({})
             if requested_errors and strict:
                 raise SnapshotBuildError(requested_errors, snapshot=snapshot)
             return snapshot
@@ -166,7 +185,8 @@ class SnapshotSession:
         revisions. ``force_refresh=True`` additionally bypasses the shared cache and requires fresh
         source resolution. Derived values already pinned in the session are refreshed transitively
         when they depend on a selected key. The session update is transactional: either every
-        affected visible resource is committed together, or the previous pinned state is retained.
+        affected visible resource and its detached delivery snapshot are committed together, or the
+        previous pinned state is retained.
 
         When ``strict=False`` and resource resolution fails, the returned snapshot contains the
         retained previous values plus transient errors for the failed refresh attempt. Those
@@ -201,11 +221,24 @@ class SnapshotSession:
                 cache_stale_results=not force_refresh,
                 force_refresh_keys=set(affected) if force_refresh else set(),
             )
-            values, errors = await self._builder._resolve_many(
-                targets,
-                context=self._context,
-                runtime=staging_runtime,
-            )
+            try:
+                values, errors = await self._builder._resolve_many(
+                    targets,
+                    context=self._context,
+                    runtime=staging_runtime,
+                )
+            except SnapshotDeadlineExceededError as error:
+                self._record_copy_deadline(phase="session_revalidate")
+                self._record_revalidation(
+                    requested=requested,
+                    affected=affected,
+                    errors=dict.fromkeys(requested, error),
+                    committed=False,
+                    refreshed=0,
+                    strict=strict,
+                    force_refresh=force_refresh,
+                )
+                raise SnapshotBuildError(dict.fromkeys(requested, error)) from error
 
             if errors:
                 self._record_revalidation(
@@ -217,7 +250,15 @@ class SnapshotSession:
                     strict=strict,
                     force_refresh=force_refresh,
                 )
-                snapshot = await self._snapshot_with_errors_async(errors)
+                try:
+                    snapshot = await self._snapshot_state_async(
+                        self._resources,
+                        {**self._errors, **errors},
+                        enforce_deadline=not self._errors_include_deadline(errors),
+                    )
+                except SnapshotDeadlineExceededError as error:
+                    self._record_copy_deadline(phase="session_revalidate_delivery")
+                    raise SnapshotBuildError(dict.fromkeys(requested, error)) from error
                 if strict:
                     raise SnapshotBuildError(errors, snapshot=snapshot)
                 return snapshot
@@ -239,18 +280,45 @@ class SnapshotSession:
                         force_refresh=force_refresh,
                         consistency_failed=True,
                     )
-                    raise self._consistency_error(
-                        violation,
-                        snapshot=await self._snapshot_with_errors_async({}),
-                    )
+                    try:
+                        snapshot = await self._snapshot_state_async(
+                            self._resources,
+                            self._errors,
+                        )
+                    except SnapshotDeadlineExceededError as error:
+                        self._record_copy_deadline(phase="session_revalidate_delivery")
+                        raise SnapshotBuildError(dict.fromkeys(requested, error)) from error
+                    raise self._consistency_error(violation, snapshot=snapshot)
+
+            candidate_resources = dict(self._resources)
+            candidate_errors = dict(self._errors)
+            for key in targets:
+                if key in candidate_resources:
+                    candidate_resources[key] = values[key]
+                candidate_errors.pop(key, None)
+
+            try:
+                snapshot = await self._snapshot_state_async(
+                    candidate_resources,
+                    candidate_errors,
+                )
+            except SnapshotDeadlineExceededError as error:
+                self._record_copy_deadline(phase="session_revalidate_delivery")
+                self._record_revalidation(
+                    requested=requested,
+                    affected=affected,
+                    errors=dict.fromkeys(requested, error),
+                    committed=False,
+                    refreshed=0,
+                    strict=strict,
+                    force_refresh=force_refresh,
+                )
+                raise SnapshotBuildError(dict.fromkeys(requested, error)) from error
 
             self._runtime.memo.clear()
             self._runtime.memo.update(staging_runtime.memo)
-            for key in targets:
-                if key in self._resources:
-                    self._resources[key] = values[key]
-                self._errors.pop(key, None)
-
+            self._resources = candidate_resources
+            self._errors = candidate_errors
             self._record_revalidation(
                 requested=requested,
                 affected=affected,
@@ -260,7 +328,7 @@ class SnapshotSession:
                 strict=strict,
                 force_refresh=force_refresh,
             )
-            return await self._snapshot_with_errors_async({})
+            return snapshot
 
     def snapshot(self) -> Snapshot:
         """Return an immutable view using synchronous payload isolation.
@@ -272,10 +340,14 @@ class SnapshotSession:
         return self._snapshot_with_errors({})
 
     async def snapshot_async(self) -> Snapshot:
-        """Return an immutable view without blocking the event loop on large copies."""
+        """Return a detached view within the session's remaining deadline."""
 
         async with self._lock:
-            return await self._snapshot_with_errors_async({})
+            try:
+                return await self._snapshot_state_async(self._resources, self._errors)
+            except SnapshotDeadlineExceededError:
+                self._record_copy_deadline(phase="session_snapshot_delivery")
+                raise
 
     async def close(self) -> None:
         async with self._lock:
@@ -339,15 +411,26 @@ class SnapshotSession:
         self,
         transient_errors: Mapping[ResourceKey, Exception],
     ) -> Snapshot:
-        errors = {**self._errors, **transient_errors}
+        return await self._snapshot_state_async(
+            self._resources,
+            {**self._errors, **transient_errors},
+        )
+
+    async def _snapshot_state_async(
+        self,
+        resources: Mapping[ResourceKey, SnapshotValue[object]],
+        errors: Mapping[ResourceKey, Exception],
+        *,
+        enforce_deadline: bool = True,
+    ) -> Snapshot:
         diagnostics = self._runtime.diagnostics.snapshot(
             now_monotonic=self._builder.clock.monotonic(),
-            resolved_resources=len(self._resources),
+            resolved_resources=len(resources),
             failed_resources=len(errors),
-            observed_at_values=tuple(value.observed_at for value in self._resources.values()),
+            observed_at_values=tuple(value.observed_at for value in resources.values()),
         )
         copied = await self._builder._async_payload_isolator.map(
-            tuple(self._resources.items()),
+            tuple(resources.items()),
             lambda item: (
                 item[0],
                 self._builder._payload_isolator.clone_snapshot_value(
@@ -355,6 +438,9 @@ class SnapshotSession:
                     context=f"snapshot delivery for {item[0]}",
                 ),
             ),
+            deadline_monotonic=(self._context.deadline_monotonic if enforce_deadline else None),
+            monotonic=self._builder.clock.monotonic,
+            deadline_context="delivering the snapshot",
         )
         return Snapshot(
             snapshot_id=self.snapshot_id,
@@ -362,6 +448,56 @@ class SnapshotSession:
             resources=dict(copied),
             errors=errors,
             diagnostics=diagnostics,
+        )
+
+    @staticmethod
+    def _errors_include_deadline(
+        errors: Mapping[ResourceKey, Exception],
+    ) -> bool:
+        for error in errors.values():
+            if isinstance(error, SnapshotDeadlineExceededError):
+                return True
+            if isinstance(error, ResourceResolutionError) and any(
+                failure.error_type == SnapshotDeadlineExceededError.__name__
+                for failure in error.failures
+            ):
+                return True
+        return False
+
+    def _record_resolve(
+        self,
+        *,
+        requested: tuple[ResourceKey, ...],
+        requested_errors: Mapping[ResourceKey, Exception],
+        total_resources: int,
+        strict: bool,
+        retry_errors: bool,
+    ) -> None:
+        self._builder.metrics.increment(
+            "snapshot_session_resolve_total",
+            status="error" if requested_errors else "success",
+        )
+        self._builder.events.emit(
+            "snapshot_session_resolved",
+            snapshot_id=self.snapshot_id,
+            requested=len(requested),
+            resolved=sum(1 for key in requested if key not in requested_errors),
+            failed=len(requested_errors),
+            total_resources=total_resources,
+            strict=strict,
+            retry_errors=retry_errors,
+        )
+
+    def _record_copy_deadline(self, *, phase: str) -> None:
+        self._builder._health_tracker.record_deadline_exceeded()
+        self._builder.metrics.increment(
+            "payload_copy_deadline_total",
+            phase=phase,
+        )
+        self._builder.events.emit(
+            "payload_copy_deadline_exceeded",
+            snapshot_id=self.snapshot_id,
+            phase=phase,
         )
 
     def _record_revalidation(

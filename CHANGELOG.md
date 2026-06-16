@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Extended bounded payload-copy offloading beyond `AsyncMemoryCache` to source results, custom-cache boundaries, publisher preparation/results, derived dependency snapshots, and asynchronous session snapshot delivery.
-- Added one builder-wide copy-concurrency limit shared by orchestration and publisher boundaries, with cancellation-safe capacity accounting.
-- Added `SnapshotSession.snapshot_async()` so asynchronous consumers can request detached snapshots without running large copies on the event loop.
-- Preserved synchronous copy behavior for `SnapshotSession.snapshot()` and non-blocking synchronous submission capture, where no asynchronous wait point is available or the copy intentionally belongs to the producer thread.
+- Included bounded payload-copy execution and copy-capacity waits in the absolute snapshot deadline.
+- Applied deadline accounting to source isolation, custom-cache boundaries, cache writes, derived dependencies, and asynchronous snapshot delivery.
+- Made successful revalidation commit only after its detached delivery snapshot is copied within the remaining deadline.
+- Preserved best-effort detached diagnostic snapshots when acquisition had already failed because the deadline was exhausted.
+- Added deterministic regressions for running copies, copy-capacity waits, cache isolation, delivery, cancellation-safe capacity, and transactional revalidation.
 
 ## 0.5.7 - 2026-06-15
 

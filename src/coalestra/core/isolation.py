@@ -7,7 +7,8 @@ from dataclasses import replace
 from functools import partial
 from typing import Any, TypeVar, cast
 
-from coalestra.core.errors import PayloadIsolationError
+from coalestra.core.deadline import remaining_deadline_seconds
+from coalestra.core.errors import PayloadIsolationError, SnapshotDeadlineExceededError
 from coalestra.core.models import SnapshotValue
 
 T = TypeVar("T")
@@ -122,13 +123,37 @@ class AsyncPayloadIsolator:
         self.max_concurrency = max_concurrency
         self._limiter = asyncio.Semaphore(max_concurrency)
 
-    async def run(self, operation: Callable[[], _CopyResult]) -> _CopyResult:
-        """Run one synchronous copy operation with cancellation-safe capacity accounting."""
+    async def run(
+        self,
+        operation: Callable[[], _CopyResult],
+        *,
+        deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] | None = None,
+        deadline_context: str = "copying a payload",
+    ) -> _CopyResult:
+        """Run one copy operation with bounded, deadline-aware capacity accounting."""
+
+        monotonic_clock = monotonic or asyncio.get_running_loop().time
+        remaining_deadline_seconds(
+            deadline_monotonic,
+            monotonic=monotonic_clock,
+            operation=deadline_context,
+        )
 
         if not self.run_in_thread:
-            return operation()
+            result = operation()
+            remaining_deadline_seconds(
+                deadline_monotonic,
+                monotonic=monotonic_clock,
+                operation=deadline_context,
+            )
+            return result
 
-        await self._limiter.acquire()
+        await self._acquire_slot(
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic_clock,
+            deadline_context=deadline_context,
+        )
         try:
             worker = asyncio.create_task(asyncio.to_thread(operation))
         except BaseException:
@@ -149,24 +174,60 @@ class AsyncPayloadIsolator:
         # Python cannot stop a worker thread after it starts. Keep its capacity slot
         # reserved until the underlying operation actually finishes.
         worker.add_done_callback(release_slot)
+        timeout_seconds = remaining_deadline_seconds(
+            deadline_monotonic,
+            monotonic=monotonic_clock,
+            operation=deadline_context,
+        )
         try:
-            return await asyncio.shield(worker)
+            completed, _pending = await asyncio.wait((worker,), timeout=timeout_seconds)
+        except BaseException:
+            raise
+
+        if worker not in completed:
+            raise SnapshotDeadlineExceededError(
+                f"snapshot deadline exceeded while {deadline_context}"
+            )
+
+        try:
+            result = await worker
+            remaining_deadline_seconds(
+                deadline_monotonic,
+                monotonic=monotonic_clock,
+                operation=deadline_context,
+            )
+            return result
         finally:
-            if worker.done():
-                release_slot(worker)
+            release_slot(worker)
 
     async def map(
         self,
         items: Collection[_CopyItem],
         operation: Callable[[_CopyItem], _CopyResult],
+        *,
+        deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] | None = None,
+        deadline_context: str = "copying payloads",
     ) -> tuple[_CopyResult, ...]:
-        """Copy an ordered collection through a fixed worker set."""
+        """Copy an ordered collection through a fixed, deadline-aware worker set."""
 
         ordered = tuple(items)
         if not ordered:
             return ()
+
+        monotonic_clock = monotonic or asyncio.get_running_loop().time
         if not self.run_in_thread:
-            return tuple(operation(item) for item in ordered)
+            inline_results: list[_CopyResult] = []
+            for item in ordered:
+                inline_results.append(
+                    await self.run(
+                        partial(operation, item),
+                        deadline_monotonic=deadline_monotonic,
+                        monotonic=monotonic_clock,
+                        deadline_context=deadline_context,
+                    )
+                )
+            return tuple(inline_results)
 
         worker_count = min(self.max_concurrency, len(ordered))
         results: dict[int, _CopyResult] = {}
@@ -177,7 +238,12 @@ class AsyncPayloadIsolator:
             while next_index < len(ordered):
                 index = next_index
                 next_index += 1
-                results[index] = await self.run(partial(operation, ordered[index]))
+                results[index] = await self.run(
+                    partial(operation, ordered[index]),
+                    deadline_monotonic=deadline_monotonic,
+                    monotonic=monotonic_clock,
+                    deadline_context=deadline_context,
+                )
 
         workers = tuple(asyncio.create_task(worker()) for _ in range(worker_count))
         try:
@@ -190,20 +256,39 @@ class AsyncPayloadIsolator:
 
         return tuple(results[index] for index in range(len(ordered)))
 
-    async def copy(self, value: T, *, context: str) -> T:
+    async def copy(
+        self,
+        value: T,
+        *,
+        context: str,
+        deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ) -> T:
         """Asynchronously isolate one payload value."""
 
-        return await self.run(partial(self.isolator.copy, value, context=context))
+        return await self.run(
+            partial(self.isolator.copy, value, context=context),
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+            deadline_context=f"isolating {context}",
+        )
 
     async def copy_metadata(
         self,
         metadata: Mapping[str, Any],
         *,
         context: str,
+        deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> dict[str, Any]:
         """Asynchronously isolate nested metadata."""
 
-        return await self.run(partial(self.isolator.copy_metadata, metadata, context=context))
+        return await self.run(
+            partial(self.isolator.copy_metadata, metadata, context=context),
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+            deadline_context=f"isolating {context}",
+        )
 
     async def clone_snapshot_value(
         self,
@@ -216,6 +301,8 @@ class AsyncPayloadIsolator:
         from_cache: bool | None = None,
         latency_ms: float | None = None,
         metadata: Mapping[str, Any] | None = None,
+        deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> SnapshotValue[Any]:
         """Asynchronously clone a snapshot value."""
 
@@ -230,5 +317,55 @@ class AsyncPayloadIsolator:
                 from_cache=from_cache,
                 latency_ms=latency_ms,
                 metadata=metadata,
+            ),
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+            deadline_context=f"isolating {context}",
+        )
+
+    async def _acquire_slot(
+        self,
+        *,
+        deadline_monotonic: float | None,
+        monotonic: Callable[[], float],
+        deadline_context: str,
+    ) -> None:
+        timeout_seconds = remaining_deadline_seconds(
+            deadline_monotonic,
+            monotonic=monotonic,
+            operation=f"waiting for copy capacity while {deadline_context}",
+        )
+        if timeout_seconds is None:
+            await self._limiter.acquire()
+            return
+
+        acquire_task = asyncio.create_task(self._limiter.acquire())
+        try:
+            completed, _pending = await asyncio.wait(
+                (acquire_task,),
+                timeout=timeout_seconds,
             )
+        except BaseException:
+            if acquire_task.done() and not acquire_task.cancelled():
+                error = acquire_task.exception()
+                if error is None and acquire_task.result():
+                    self._limiter.release()
+            else:
+                acquire_task.cancel()
+                await asyncio.gather(acquire_task, return_exceptions=True)
+            raise
+
+        if acquire_task in completed:
+            await acquire_task
+            return
+
+        acquire_task.cancel()
+        await asyncio.gather(acquire_task, return_exceptions=True)
+        if acquire_task.done() and not acquire_task.cancelled():
+            error = acquire_task.exception()
+            if error is None and acquire_task.result():
+                self._limiter.release()
+        raise SnapshotDeadlineExceededError(
+            "snapshot deadline exceeded while waiting for payload copy capacity "
+            f"during {deadline_context}"
         )

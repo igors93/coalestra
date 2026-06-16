@@ -525,6 +525,9 @@ class SourceExecutor:
                             context=f"derived dependency for {item[0]}",
                         ),
                     ),
+                    deadline_monotonic=context.deadline_monotonic,
+                    monotonic=self.calls.clock.monotonic,
+                    deadline_context=f"isolating dependencies for derived source {source.name}",
                 )
                 isolated_dependencies = dict(isolated_dependency_items)
                 dependency_snapshot = Snapshot(

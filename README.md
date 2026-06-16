@@ -194,29 +194,15 @@ builder = SnapshotBuilder(
 
 `AsyncMemoryCache` and standalone `ResourcePublisher` instances accept the same `payload_copier` option. Returning the original object from a custom copier is safe only when the payload is deeply immutable.
 
-The built-in `copy.deepcopy` path is offloaded automatically at asynchronous ownership boundaries. This includes source results, custom-cache reads and writes, publisher values and results, derived dependency snapshots, and asynchronous session snapshot delivery. One builder-wide limit bounds orchestration and publisher copies:
+### Copy execution and snapshot deadlines
 
-```python
-builder = SnapshotBuilder(
-    sources,
-    max_copy_concurrency=4,
-)
-```
+The default deep-copy path runs through bounded worker threads at asynchronous ownership boundaries. The same absolute deadline created by `build(..., deadline_seconds=...)` or `builder.session(deadline_seconds=...)` covers waiting for copy capacity, executing the copy, cache-boundary isolation, and asynchronous snapshot delivery. A copy that cannot finish within the remaining budget fails with `SnapshotDeadlineExceededError`; when raised by `build` or `resolve`, it is reported through `SnapshotBuildError` like other resource failures.
 
-Custom copiers remain inline by default because they may depend on thread affinity. A thread-safe custom copier can opt in explicitly:
+Python cannot safely terminate a worker thread that has already started. When a caller reaches its deadline, Coalestra stops waiting but keeps the copy-capacity slot reserved until that worker actually finishes. This prevents timed-out or cancelled copies from allowing more concurrent work than the configured limit.
 
-```python
-builder = SnapshotBuilder(
-    sources,
-    payload_copier=custom_copier,
-    run_payload_copies_in_thread=True,
-    max_copy_concurrency=2,
-)
-```
+If acquisition has already failed because the deadline expired, Coalestra may still create a detached diagnostic snapshot outside the exhausted budget so `strict=False` and partial-error workflows retain their existing behavior. That best-effort copy cannot turn the failed operation into a success. Successful revalidation is stricter: candidate values are not committed until their detached delivery snapshot has also been copied within the remaining deadline.
 
-`AsyncMemoryCache` keeps its own copy limit through `run_payload_copies_in_thread` and `max_copy_concurrency`. The builder's existing `cache_run_payload_copies_in_thread` and `cache_max_copy_concurrency` options configure only the default cache it creates.
-
-Async session consumers should use `await session.snapshot_async()` when requesting an additional detached snapshot. `session.snapshot()` remains synchronous for compatibility and therefore performs its copy on the calling thread. The synchronous facade automatically uses the asynchronous delivery path on its persistent event loop.
+Custom payload copiers remain inline unless `run_payload_copies_in_thread=True` is set. Inline synchronous code cannot be interrupted while it is running, but Coalestra checks the deadline before and after the operation and reports an exhausted budget instead of accepting the late result.
 
 ## Source authority
 

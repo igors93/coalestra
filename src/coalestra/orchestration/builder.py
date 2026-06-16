@@ -345,12 +345,18 @@ class SnapshotBuilder:
             try:
                 snapshot = await session.resolve(keys, strict=strict)
             except SnapshotBuildError as error:
-                snapshot = error.snapshot or await session.snapshot_async()
-                self._record_snapshot_built(
-                    snapshot,
-                    strict=strict,
-                    failed=True,
-                )
+                if error.snapshot is None:
+                    self._record_snapshot_failed_without_delivery(
+                        snapshot_id=session.snapshot_id,
+                        failed_resources=len(error.errors),
+                        strict=strict,
+                    )
+                else:
+                    self._record_snapshot_built(
+                        error.snapshot,
+                        strict=strict,
+                        failed=True,
+                    )
                 raise
             self._record_snapshot_built(snapshot, strict=strict)
             return snapshot
@@ -378,10 +384,14 @@ class SnapshotBuilder:
             self._record_snapshot_built(snapshot, strict=True, failed=False)
             return snapshot
         except SnapshotBuildError as error:
-            snapshot = error.snapshot or await session.snapshot_async()
-            self._record_snapshot_built(snapshot, strict=True, failed=True)
             if error.snapshot is None:
-                error.snapshot = snapshot
+                self._record_snapshot_failed_without_delivery(
+                    snapshot_id=session.snapshot_id,
+                    failed_resources=len(error.errors),
+                    strict=True,
+                )
+            else:
+                self._record_snapshot_built(error.snapshot, strict=True, failed=True)
             raise
         finally:
             await session.close()
@@ -465,6 +475,7 @@ class SnapshotBuilder:
             now=self.clock.now(),
             policies=policies,
             diagnostics=runtime.diagnostics,
+            context=context,
         )
         for key in cache_keys:
             lookup = lookups[key]
@@ -492,6 +503,7 @@ class SnapshotBuilder:
                     extra_metadata={"refresh_scheduled": refresh_scheduled}
                     if refresh_scheduled
                     else None,
+                    context=context,
                 )
                 runtime.memo[key] = cached
                 values[key] = cached
@@ -522,6 +534,7 @@ class SnapshotBuilder:
                         "refresh_mode": RefreshMode.STALE_WHILE_REVALIDATE.value,
                         "refresh_scheduled": refresh_scheduled,
                     },
+                    context=context,
                 )
                 runtime.memo[key] = cached
                 values[key] = cached
@@ -619,6 +632,7 @@ class SnapshotBuilder:
                         "fallback_error_type": type(error).__name__,
                         "fallback_error": str(error),
                     },
+                    context=context,
                 )
                 runtime.memo[key] = value
                 values[key] = value
@@ -767,7 +781,9 @@ class SnapshotBuilder:
 
             if fresh_values:
                 write_results = await self._cache_access.set_many(
-                    fresh_values, diagnostics=runtime.diagnostics
+                    fresh_values,
+                    diagnostics=runtime.diagnostics,
+                    context=context,
                 )
                 if write_results:
                     for written in fresh_values:
@@ -780,6 +796,7 @@ class SnapshotBuilder:
                                 result.value,
                                 stale=False,
                                 extra_metadata={"superseded_source": written.source},
+                                context=context,
                             )
                             runtime.memo[written.key] = winning
                             resolved[written.key] = ResolutionResult(value=winning)
@@ -807,12 +824,35 @@ class SnapshotBuilder:
             )
 
         if stale_to_cache and runtime.cache_stale_results:
-            await self._cache_access.set_many(stale_to_cache, diagnostics=runtime.diagnostics)
+            await self._cache_access.set_many(
+                stale_to_cache,
+                diagnostics=runtime.diagnostics,
+                context=context,
+            )
         return resolved
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("SnapshotBuilder is closed")
+
+    def _record_snapshot_failed_without_delivery(
+        self,
+        *,
+        snapshot_id: str,
+        failed_resources: int,
+        strict: bool,
+    ) -> None:
+        self.metrics.increment("snapshot_build_total", status="error")
+        self.events.emit(
+            "snapshot_built",
+            snapshot_id=snapshot_id,
+            resources=failed_resources,
+            resolved=0,
+            failed=failed_resources,
+            build_failed=True,
+            strict=strict,
+            diagnostics=None,
+        )
 
     def _record_snapshot_built(
         self,

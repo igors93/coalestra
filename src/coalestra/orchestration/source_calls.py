@@ -100,7 +100,8 @@ class SourceCalls:
             lease.release()
         return await self.coerce_payload(
             result,
-            context=f"source {source.name} payload for {key}",
+            copy_context=f"source {source.name} payload for {key}",
+            fetch_context=context,
         )
 
     async def fetch_many_once(
@@ -148,6 +149,9 @@ class SourceCalls:
                     context=f"batch source {source.name} payload for {item[0]}",
                 ),
             ),
+            deadline_monotonic=context.deadline_monotonic,
+            monotonic=self.clock.monotonic,
+            deadline_context=f"isolating batch source {source.name} payloads",
         )
         return dict(copied)
 
@@ -176,7 +180,8 @@ class SourceCalls:
             lease.release()
         return await self.coerce_payload(
             result,
-            context=f"derived source {source.name} payload for {key}",
+            copy_context=f"derived source {source.name} payload for {key}",
+            fetch_context=context,
         )
 
     async def acquire_capacity(
@@ -317,10 +322,14 @@ class SourceCalls:
         self,
         value: SourcePayload[Any] | Any,
         *,
-        context: str,
+        copy_context: str,
+        fetch_context: FetchContext,
     ) -> SourcePayload[Any]:
         return await self.async_payload_isolator.run(
-            partial(self._coerce_payload_sync, value, context=context)
+            partial(self._coerce_payload_sync, value, context=copy_context),
+            deadline_monotonic=fetch_context.deadline_monotonic,
+            monotonic=self.clock.monotonic,
+            deadline_context=f"isolating {copy_context}",
         )
 
     def _coerce_payload_sync(

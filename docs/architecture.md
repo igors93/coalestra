@@ -186,7 +186,11 @@ Transactional session revalidation accepts the same policy for its explicitly se
 
 ## Deadlines and timeouts
 
-A deadline is created once per build or session using a monotonic clock. Source timeout covers waiting for capacity and executing the source call. This ensures queued work cannot outlive the consumer's acquisition deadline.
+A deadline is created once per build or session using a monotonic clock. The same absolute budget covers source-capacity waits, source execution, cache-boundary operations, bounded payload-copy capacity, payload-copy execution, derived dependency isolation, and asynchronous snapshot delivery. This prevents work after acquisition from silently extending the consumer's total wait.
+
+Worker threads that have already started cannot be terminated safely. When a copy reaches the snapshot deadline, the caller stops waiting and receives `SnapshotDeadlineExceededError`, while the worker keeps its copy-capacity slot until it really finishes. This preserves the configured concurrency bound during timeout or cancellation storms.
+
+A partial diagnostic snapshot is a compatibility exception: when acquisition has already failed because the deadline was exhausted, asynchronous delivery may copy the retained state without reapplying the exhausted budget. The operation remains failed and the diagnostic copy cannot commit new values. Successful revalidation copies its candidate delivery snapshot before committing the staged memo and visible resources, so a delivery timeout leaves the previous session state intact.
 
 ## Extension points
 
@@ -240,6 +244,8 @@ The builder owns a second bounded copy runner for ownership boundaries outside t
 The runner uses a fixed worker set and one shared semaphore per builder, so a large batch does not create one task or one thread per resource. Cancellation cannot terminate an already-running Python thread; the corresponding capacity slot remains reserved until the copy finishes. This prevents cancellation storms from bypassing the configured limit.
 
 The default copier is offloaded automatically. Custom copiers remain inline unless explicitly marked safe for worker threads. `SnapshotSession.snapshot_async()` uses the bounded runner, while the compatibility `snapshot()` method remains synchronous because it cannot await worker completion.
+
+Every builder-managed asynchronous copy accepts the session's absolute monotonic deadline. The limit includes both time queued behind the shared copy semaphore and time waiting for the worker result. Cache calls are wrapped by the same deadline so copies performed by the default `AsyncMemoryCache` also remain inside the snapshot budget. The synchronous compatibility method `SnapshotSession.snapshot()` cannot await or interrupt work and therefore does not enforce asynchronous copy deadlines.
 
 ## Refresh state machine
 
