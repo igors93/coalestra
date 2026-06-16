@@ -7,7 +7,7 @@ from typing import Any
 from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.health import OperationalHealthTracker
-from coalestra.core.isolation import PayloadIsolator
+from coalestra.core.isolation import AsyncPayloadIsolator, PayloadIsolator
 from coalestra.core.models import (
     CacheLookup,
     CacheWriteResult,
@@ -33,6 +33,7 @@ class CacheAccess:
         cache: AsyncCache,
         clock: Clock,
         payload_isolator: PayloadIsolator,
+        async_payload_isolator: AsyncPayloadIsolator,
         max_pending_tasks: int,
         health_tracker: OperationalHealthTracker | None = None,
     ) -> None:
@@ -41,6 +42,7 @@ class CacheAccess:
         if max_pending_tasks < 1:
             raise ValueError("max_pending_tasks must be at least 1")
         self.payload_isolator = payload_isolator
+        self.async_payload_isolator = async_payload_isolator
         self.max_pending_tasks = int(max_pending_tasks)
         self.health_tracker = health_tracker
         self._all_values_policy = FreshnessPolicy(
@@ -75,7 +77,11 @@ class CacheAccess:
             )
             lookups = dict(zip(unique, completed, strict=True))
 
-        isolated = {key: self._isolated_lookup(key, lookups[key]) for key in unique}
+        isolated_items = await self.async_payload_isolator.map(
+            tuple((key, lookups[key]) for key in unique),
+            lambda item: (item[0], self._isolated_lookup(item[0], item[1])),
+        )
+        isolated = dict(isolated_items)
         if bool(getattr(self.cache, "validates_dependency_versions", False)):
             return isolated
         return await self._filter_invalid_dependencies(isolated, now=now)
@@ -89,12 +95,11 @@ class CacheAccess:
         unique = tuple({value.key: value for value in values}.values())
         if not unique:
             return None
-        isolated = tuple(
-            self.payload_isolator.clone_snapshot_value(
-                value,
-                context=f"cache write for {value.key}",
-            )
-            for value in unique
+        isolated = await self.async_payload_isolator.map(
+            unique,
+            lambda value: self.payload_isolator.clone_snapshot_value(
+                value, context=f"cache write for {value.key}"
+            ),
         )
         if isinstance(self.cache, BatchAtomicAsyncCache):
             diagnostics.cache_batch_writes += 1
@@ -128,7 +133,7 @@ class CacheAccess:
         )
         return None
 
-    def cached_copy(
+    async def cached_copy(
         self,
         value: SnapshotValue[Any],
         *,
@@ -137,7 +142,7 @@ class CacheAccess:
     ) -> SnapshotValue[Any]:
         now = self.clock.now()
         metadata = {**value.metadata, **dict(extra_metadata or {})}
-        return self.payload_isolator.clone_snapshot_value(
+        return await self.async_payload_isolator.clone_snapshot_value(
             value,
             context=f"cached snapshot value for {value.key}",
             fetched_at=now,

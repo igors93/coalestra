@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, TypeVar
 
 from coalestra.concurrency.capacity import CapacityController, CapacityLease
@@ -16,7 +17,7 @@ from coalestra.core.errors import (
     SourceTimeoutError,
     SourceUnavailableError,
 )
-from coalestra.core.isolation import PayloadIsolator
+from coalestra.core.isolation import AsyncPayloadIsolator, PayloadIsolator
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue, SourcePayload
 from coalestra.core.protocols import (
     BatchSnapshotSource,
@@ -61,6 +62,7 @@ class SourceCalls:
         events: EventSink,
         observation_policy: ObservationPolicy,
         payload_isolator: PayloadIsolator,
+        async_payload_isolator: AsyncPayloadIsolator,
         authority_resolver: AuthorityPolicyResolver,
     ) -> None:
         self.clock = clock
@@ -71,6 +73,7 @@ class SourceCalls:
         self.events = events
         self.observation_policy = observation_policy
         self.payload_isolator = payload_isolator
+        self.async_payload_isolator = async_payload_isolator
         self.authority_resolver = authority_resolver
 
     async def fetch_once(
@@ -93,12 +96,12 @@ class SourceCalls:
                 lambda: source.fetch(key, context),
                 resource=key,
             )
-            return self.coerce_payload(
-                result,
-                context=f"source {source.name} payload for {key}",
-            )
         finally:
             lease.release()
+        return await self.coerce_payload(
+            result,
+            context=f"source {source.name} payload for {key}",
+        )
 
     async def fetch_many_once(
         self,
@@ -120,28 +123,33 @@ class SourceCalls:
                 lambda: source.fetch_many(keys, context),
                 resource=None,
             )
-            if not isinstance(result, Mapping):
-                raise SourceProtocolError(
-                    f"batch source {source.name} must return a mapping, got {type(result).__name__}"
-                )
-
-            requested = set(keys)
-            unexpected = [key for key in result if key not in requested]
-            if unexpected:
-                rendered = ", ".join(str(key) for key in unexpected)
-                raise SourceProtocolError(
-                    f"batch source {source.name} returned unrequested resources: {rendered}"
-                )
-
-            return {
-                key: self.coerce_payload(
-                    value,
-                    context=f"batch source {source.name} payload for {key}",
-                )
-                for key, value in result.items()
-            }
         finally:
             lease.release()
+
+        if not isinstance(result, Mapping):
+            raise SourceProtocolError(
+                f"batch source {source.name} must return a mapping, got {type(result).__name__}"
+            )
+
+        requested = set(keys)
+        unexpected = [key for key in result if key not in requested]
+        if unexpected:
+            rendered = ", ".join(str(key) for key in unexpected)
+            raise SourceProtocolError(
+                f"batch source {source.name} returned unrequested resources: {rendered}"
+            )
+
+        copied = await self.async_payload_isolator.map(
+            tuple(result.items()),
+            lambda item: (
+                item[0],
+                self._coerce_payload_sync(
+                    item[1],
+                    context=f"batch source {source.name} payload for {item[0]}",
+                ),
+            ),
+        )
+        return dict(copied)
 
     async def derive_once(
         self,
@@ -164,12 +172,12 @@ class SourceCalls:
                 lambda: source.derive(key, dependencies, context),
                 resource=key,
             )
-            return self.coerce_payload(
-                result,
-                context=f"derived source {source.name} payload for {key}",
-            )
         finally:
             lease.release()
+        return await self.coerce_payload(
+            result,
+            context=f"derived source {source.name} payload for {key}",
+        )
 
     async def acquire_capacity(
         self,
@@ -305,7 +313,17 @@ class SourceCalls:
             dependency_versions=dependency_versions or {},
         )
 
-    def coerce_payload(
+    async def coerce_payload(
+        self,
+        value: SourcePayload[Any] | Any,
+        *,
+        context: str,
+    ) -> SourcePayload[Any]:
+        return await self.async_payload_isolator.run(
+            partial(self._coerce_payload_sync, value, context=context)
+        )
+
+    def _coerce_payload_sync(
         self,
         value: SourcePayload[Any] | Any,
         *,

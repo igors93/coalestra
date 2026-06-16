@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import asyncio
+from collections.abc import Callable, Collection, Mapping
 from copy import deepcopy
 from dataclasses import replace
+from functools import partial
 from typing import Any, TypeVar, cast
 
 from coalestra.core.errors import PayloadIsolationError
 from coalestra.core.models import SnapshotValue
 
 T = TypeVar("T")
+_CopyItem = TypeVar("_CopyItem")
+_CopyResult = TypeVar("_CopyResult")
 PayloadCopier = Callable[[Any], Any]
 
 
@@ -22,7 +26,14 @@ class PayloadIsolator:
     """Create independent payload copies at source, cache, and snapshot boundaries."""
 
     def __init__(self, copier: PayloadCopier | None = None) -> None:
+        self._uses_default_copier = copier is None
         self._copier = copier or deepcopy_payload
+
+    @property
+    def uses_default_copier(self) -> bool:
+        """Whether this isolator uses Coalestra's built-in ``copy.deepcopy`` copier."""
+
+        return self._uses_default_copier
 
     def copy(self, value: T, *, context: str) -> T:
         """Copy one value and raise a stable Coalestra error when copying fails."""
@@ -85,3 +96,139 @@ class PayloadIsolator:
         if latency_ms is not None:
             changes["latency_ms"] = latency_ms
         return replace(value, **changes)
+
+
+class AsyncPayloadIsolator:
+    """Run payload isolation without monopolizing the event loop when configured."""
+
+    def __init__(
+        self,
+        isolator: PayloadIsolator,
+        *,
+        run_in_thread: bool | None = None,
+        max_concurrency: int = 4,
+    ) -> None:
+        if run_in_thread is not None and not isinstance(run_in_thread, bool):
+            raise TypeError("run_in_thread must be a boolean or None")
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int):
+            raise TypeError("max_concurrency must be an integer")
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+
+        self.isolator = isolator
+        self.run_in_thread = (
+            isolator.uses_default_copier if run_in_thread is None else run_in_thread
+        )
+        self.max_concurrency = max_concurrency
+        self._limiter = asyncio.Semaphore(max_concurrency)
+
+    async def run(self, operation: Callable[[], _CopyResult]) -> _CopyResult:
+        """Run one synchronous copy operation with cancellation-safe capacity accounting."""
+
+        if not self.run_in_thread:
+            return operation()
+
+        await self._limiter.acquire()
+        try:
+            worker = asyncio.create_task(asyncio.to_thread(operation))
+        except BaseException:
+            self._limiter.release()
+            raise
+
+        released = False
+
+        def release_slot(task: asyncio.Task[_CopyResult]) -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            if not task.cancelled():
+                task.exception()
+            self._limiter.release()
+
+        # Python cannot stop a worker thread after it starts. Keep its capacity slot
+        # reserved until the underlying operation actually finishes.
+        worker.add_done_callback(release_slot)
+        try:
+            return await asyncio.shield(worker)
+        finally:
+            if worker.done():
+                release_slot(worker)
+
+    async def map(
+        self,
+        items: Collection[_CopyItem],
+        operation: Callable[[_CopyItem], _CopyResult],
+    ) -> tuple[_CopyResult, ...]:
+        """Copy an ordered collection through a fixed worker set."""
+
+        ordered = tuple(items)
+        if not ordered:
+            return ()
+        if not self.run_in_thread:
+            return tuple(operation(item) for item in ordered)
+
+        worker_count = min(self.max_concurrency, len(ordered))
+        results: dict[int, _CopyResult] = {}
+        next_index = 0
+
+        async def worker() -> None:
+            nonlocal next_index
+            while next_index < len(ordered):
+                index = next_index
+                next_index += 1
+                results[index] = await self.run(partial(operation, ordered[index]))
+
+        workers = tuple(asyncio.create_task(worker()) for _ in range(worker_count))
+        try:
+            await asyncio.gather(*workers)
+        except BaseException:
+            for worker_task in workers:
+                worker_task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
+
+        return tuple(results[index] for index in range(len(ordered)))
+
+    async def copy(self, value: T, *, context: str) -> T:
+        """Asynchronously isolate one payload value."""
+
+        return await self.run(partial(self.isolator.copy, value, context=context))
+
+    async def copy_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        context: str,
+    ) -> dict[str, Any]:
+        """Asynchronously isolate nested metadata."""
+
+        return await self.run(partial(self.isolator.copy_metadata, metadata, context=context))
+
+    async def clone_snapshot_value(
+        self,
+        value: SnapshotValue[Any],
+        *,
+        context: str,
+        fetched_at: float | None = None,
+        age_seconds: float | None = None,
+        stale: bool | None = None,
+        from_cache: bool | None = None,
+        latency_ms: float | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> SnapshotValue[Any]:
+        """Asynchronously clone a snapshot value."""
+
+        return await self.run(
+            partial(
+                self.isolator.clone_snapshot_value,
+                value,
+                context=context,
+                fetched_at=fetched_at,
+                age_seconds=age_seconds,
+                stale=stale,
+                from_cache=from_cache,
+                latency_ms=latency_ms,
+                metadata=metadata,
+            )
+        )

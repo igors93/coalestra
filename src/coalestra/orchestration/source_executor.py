@@ -516,13 +516,17 @@ class SourceExecutor:
                         errors=dependency_errors,
                     )
 
-                isolated_dependencies = {
-                    dependency_key: self.calls.payload_isolator.clone_snapshot_value(
-                        dependency_value,
-                        context=f"derived dependency for {dependency_key}",
-                    )
-                    for dependency_key, dependency_value in dependency_values.items()
-                }
+                isolated_dependency_items = await self.calls.async_payload_isolator.map(
+                    tuple(dependency_values.items()),
+                    lambda item: (
+                        item[0],
+                        self.calls.payload_isolator.clone_snapshot_value(
+                            item[1],
+                            context=f"derived dependency for {item[0]}",
+                        ),
+                    ),
+                )
+                isolated_dependencies = dict(isolated_dependency_items)
                 dependency_snapshot = Snapshot(
                     snapshot_id=context.snapshot_id,
                     created_at=context.requested_at,

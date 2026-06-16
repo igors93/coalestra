@@ -233,6 +233,14 @@ Single-key custom caches remain supported through ordered fixed-worker fallbacks
 
 The built-in `copy.deepcopy` path runs through bounded `asyncio.to_thread` workers by default. A per-cache semaphore limits active copies, and fixed-worker batch dispatch prevents one large cache operation from creating one task per resource. If a caller is cancelled after a worker thread starts, the thread continues because Python cannot terminate it safely; its semaphore slot remains reserved until completion. Custom payload copiers remain inline unless threaded execution is explicitly enabled, preserving compatibility with thread-affine implementations.
 
+## Cross-boundary payload copy model
+
+The builder owns a second bounded copy runner for ownership boundaries outside the cache. Source payloads are copied after source capacity is released. Custom-cache values are copied before entering builder state and before cache writes. Publisher candidates, cache handoff values, and returned publication results use the same runner. Derived sources receive dependency snapshots copied through that runner, and asynchronous session delivery uses it before exposing values to callers.
+
+The runner uses a fixed worker set and one shared semaphore per builder, so a large batch does not create one task or one thread per resource. Cancellation cannot terminate an already-running Python thread; the corresponding capacity slot remains reserved until the copy finishes. This prevents cancellation storms from bypassing the configured limit.
+
+The default copier is offloaded automatically. Custom copiers remain inline unless explicitly marked safe for worker threads. `SnapshotSession.snapshot_async()` uses the bounded runner, while the compatibility `snapshot()` method remains synchronous because it cannot await worker completion.
+
 ## Refresh state machine
 
 ```text

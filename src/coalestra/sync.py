@@ -281,7 +281,7 @@ class SyncSnapshotSession:
         self.close()
 
     async def _snapshot_async(self) -> Snapshot:
-        return self._session.snapshot()
+        return await self._session.snapshot_async()
 
     def _ensure_open(self) -> None:
         if self.closed:

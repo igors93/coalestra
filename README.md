@@ -157,7 +157,7 @@ key = ResourceKey(
 
 ## Batch cache operations and refresh policies
 
-`AsyncMemoryCache` keeps freshness checks, dependency validation, LRU bookkeeping, and authority-aware commit decisions under its internal lock. Payload and metadata copies run after the lock is released. The default `copy.deepcopy` copier is also executed through bounded worker threads, preventing a large copy from monopolizing the event loop. Custom copiers remain inline by default because they may depend on thread affinity; set `run_payload_copies_in_thread=True` only when a custom copier is thread-safe. The cache defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation.
+`AsyncMemoryCache` performs multi-key reads and writes under one lock, defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation. Custom caches may implement `BatchAsyncCache`; older single-key caches remain supported.
 
 Freshness policies support three refresh modes:
 
@@ -194,25 +194,29 @@ builder = SnapshotBuilder(
 
 `AsyncMemoryCache` and standalone `ResourcePublisher` instances accept the same `payload_copier` option. Returning the original object from a custom copier is safe only when the payload is deeply immutable.
 
-Large default cache copies are offloaded automatically. Thread-safe custom copiers can opt in explicitly, with bounded concurrency:
+The built-in `copy.deepcopy` path is offloaded automatically at asynchronous ownership boundaries. This includes source results, custom-cache reads and writes, publisher values and results, derived dependency snapshots, and asynchronous session snapshot delivery. One builder-wide limit bounds orchestration and publisher copies:
 
 ```python
-from coalestra import AsyncMemoryCache, SnapshotBuilder
+builder = SnapshotBuilder(
+    sources,
+    max_copy_concurrency=4,
+)
+```
 
-cache = AsyncMemoryCache(
+Custom copiers remain inline by default because they may depend on thread affinity. A thread-safe custom copier can opt in explicitly:
+
+```python
+builder = SnapshotBuilder(
+    sources,
     payload_copier=custom_copier,
     run_payload_copies_in_thread=True,
     max_copy_concurrency=2,
 )
-
-builder = SnapshotBuilder(
-    sources,
-    cache_run_payload_copies_in_thread=True,
-    cache_max_copy_concurrency=2,
-)
 ```
 
-The builder settings apply only when it creates its default `AsyncMemoryCache`. When a custom cache is supplied, configure that cache directly. Cancellation does not stop a Python thread that has already started; Coalestra therefore keeps the copy-capacity slot reserved until the underlying copy finishes.
+`AsyncMemoryCache` keeps its own copy limit through `run_payload_copies_in_thread` and `max_copy_concurrency`. The builder's existing `cache_run_payload_copies_in_thread` and `cache_max_copy_concurrency` options configure only the default cache it creates.
+
+Async session consumers should use `await session.snapshot_async()` when requesting an additional detached snapshot. `session.snapshot()` remains synchronous for compatibility and therefore performs its copy on the calling thread. The synchronous facade automatically uses the asynchronous delivery path on its persistent event loop.
 
 ## Source authority
 

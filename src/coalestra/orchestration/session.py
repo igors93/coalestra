@@ -114,7 +114,7 @@ class SnapshotSession:
                 retry_errors=retry_errors,
             )
 
-            snapshot = self.snapshot()
+            snapshot = await self._snapshot_with_errors_async({})
             if requested_errors and strict:
                 raise SnapshotBuildError(requested_errors, snapshot=snapshot)
             return snapshot
@@ -217,7 +217,7 @@ class SnapshotSession:
                     strict=strict,
                     force_refresh=force_refresh,
                 )
-                snapshot = self._snapshot_with_errors(errors)
+                snapshot = await self._snapshot_with_errors_async(errors)
                 if strict:
                     raise SnapshotBuildError(errors, snapshot=snapshot)
                 return snapshot
@@ -241,7 +241,7 @@ class SnapshotSession:
                     )
                     raise self._consistency_error(
                         violation,
-                        snapshot=self.snapshot(),
+                        snapshot=await self._snapshot_with_errors_async({}),
                     )
 
             self._runtime.memo.clear()
@@ -260,12 +260,22 @@ class SnapshotSession:
                 strict=strict,
                 force_refresh=force_refresh,
             )
-            return self.snapshot()
+            return await self._snapshot_with_errors_async({})
 
     def snapshot(self) -> Snapshot:
-        """Return an immutable view of everything explicitly requested in this session."""
+        """Return an immutable view using synchronous payload isolation.
+
+        Async consumers should prefer :meth:`snapshot_async` so large default copies can run
+        outside the event loop. This synchronous method remains available for compatibility.
+        """
 
         return self._snapshot_with_errors({})
+
+    async def snapshot_async(self) -> Snapshot:
+        """Return an immutable view without blocking the event loop on large copies."""
+
+        async with self._lock:
+            return await self._snapshot_with_errors_async({})
 
     async def close(self) -> None:
         async with self._lock:
@@ -321,6 +331,35 @@ class SnapshotSession:
             snapshot_id=self.snapshot_id,
             created_at=self.created_at,
             resources=resources,
+            errors=errors,
+            diagnostics=diagnostics,
+        )
+
+    async def _snapshot_with_errors_async(
+        self,
+        transient_errors: Mapping[ResourceKey, Exception],
+    ) -> Snapshot:
+        errors = {**self._errors, **transient_errors}
+        diagnostics = self._runtime.diagnostics.snapshot(
+            now_monotonic=self._builder.clock.monotonic(),
+            resolved_resources=len(self._resources),
+            failed_resources=len(errors),
+            observed_at_values=tuple(value.observed_at for value in self._resources.values()),
+        )
+        copied = await self._builder._async_payload_isolator.map(
+            tuple(self._resources.items()),
+            lambda item: (
+                item[0],
+                self._builder._payload_isolator.clone_snapshot_value(
+                    item[1],
+                    context=f"snapshot delivery for {item[0]}",
+                ),
+            ),
+        )
+        return Snapshot(
+            snapshot_id=self.snapshot_id,
+            created_at=self.created_at,
+            resources=dict(copied),
             errors=errors,
             diagnostics=diagnostics,
         )

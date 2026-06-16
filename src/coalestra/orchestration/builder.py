@@ -18,7 +18,7 @@ from coalestra.core.errors import (
     SourceProtocolError,
 )
 from coalestra.core.health import BuilderHealth, OperationalHealthTracker
-from coalestra.core.isolation import PayloadCopier, PayloadIsolator
+from coalestra.core.isolation import AsyncPayloadIsolator, PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
     CacheWriteStatus,
     FetchContext,
@@ -94,6 +94,8 @@ class SnapshotBuilder:
         source_support_cache_max_entries: int | None = 100_000,
         manage_lifecycle: bool = False,
         payload_copier: PayloadCopier | None = None,
+        run_payload_copies_in_thread: bool | None = None,
+        max_copy_concurrency: int = 4,
         cache_run_payload_copies_in_thread: bool | None = None,
         cache_max_copy_concurrency: int = 4,
     ) -> None:
@@ -109,6 +111,14 @@ class SnapshotBuilder:
             raise ValueError("max_pending_tasks must be at least 1 or None")
         if source_support_cache_max_entries is not None and source_support_cache_max_entries < 1:
             raise ValueError("source_support_cache_max_entries must be at least 1 or None")
+        if run_payload_copies_in_thread is not None and not isinstance(
+            run_payload_copies_in_thread, bool
+        ):
+            raise TypeError("run_payload_copies_in_thread must be a boolean or None")
+        if isinstance(max_copy_concurrency, bool) or not isinstance(max_copy_concurrency, int):
+            raise TypeError("max_copy_concurrency must be an integer")
+        if max_copy_concurrency < 1:
+            raise ValueError("max_copy_concurrency must be at least 1")
         if cache_run_payload_copies_in_thread is not None and not isinstance(
             cache_run_payload_copies_in_thread, bool
         ):
@@ -134,6 +144,13 @@ class SnapshotBuilder:
         self.policy_resolver = policy_resolver or PolicyResolver(default)
         self.authority_resolver = authority_resolver or AuthorityPolicyResolver(authority_policy)
         self._payload_isolator = PayloadIsolator(payload_copier)
+        self._async_payload_isolator = AsyncPayloadIsolator(
+            self._payload_isolator,
+            run_in_thread=run_payload_copies_in_thread,
+            max_concurrency=max_copy_concurrency,
+        )
+        self.run_payload_copies_in_thread = self._async_payload_isolator.run_in_thread
+        self.max_copy_concurrency = self._async_payload_isolator.max_concurrency
         self.cache = cache or AsyncMemoryCache(
             payload_copier=payload_copier,
             run_payload_copies_in_thread=cache_run_payload_copies_in_thread,
@@ -186,6 +203,7 @@ class SnapshotBuilder:
             cache=self.cache,
             clock=self.clock,
             payload_isolator=self._payload_isolator,
+            async_payload_isolator=self._async_payload_isolator,
             max_pending_tasks=self.max_pending_tasks,
             health_tracker=self._health_tracker,
         )
@@ -198,6 +216,7 @@ class SnapshotBuilder:
             events=self.events,
             observation_policy=self.observation_policy,
             payload_isolator=self._payload_isolator,
+            async_payload_isolator=self._async_payload_isolator,
             authority_resolver=self.authority_resolver,
         )
         self._source_executor = SourceExecutor(
@@ -225,6 +244,7 @@ class SnapshotBuilder:
             events=self.events,
             observation_policy=self.observation_policy,
             payload_isolator=self._payload_isolator,
+            _async_payload_isolator=self._async_payload_isolator,
             authority_resolver=self.authority_resolver,
             max_pending_tasks=self.max_pending_tasks,
             health_tracker=self._health_tracker,
@@ -323,15 +343,15 @@ class SnapshotBuilder:
         )
         try:
             try:
-                await session.resolve(keys, strict=strict)
-            except SnapshotBuildError:
+                snapshot = await session.resolve(keys, strict=strict)
+            except SnapshotBuildError as error:
+                snapshot = error.snapshot or await session.snapshot_async()
                 self._record_snapshot_built(
-                    session.snapshot(),
+                    snapshot,
                     strict=strict,
                     failed=True,
                 )
                 raise
-            snapshot = session.snapshot()
             self._record_snapshot_built(snapshot, strict=strict)
             return snapshot
         finally:
@@ -358,7 +378,7 @@ class SnapshotBuilder:
             self._record_snapshot_built(snapshot, strict=True, failed=False)
             return snapshot
         except SnapshotBuildError as error:
-            snapshot = session.snapshot()
+            snapshot = error.snapshot or await session.snapshot_async()
             self._record_snapshot_built(snapshot, strict=True, failed=True)
             if error.snapshot is None:
                 error.snapshot = snapshot
@@ -466,7 +486,7 @@ class SnapshotBuilder:
                         diagnostics=runtime.diagnostics,
                         reason="refresh_ahead",
                     )
-                cached = self._cache_access.cached_copy(
+                cached = await self._cache_access.cached_copy(
                     lookup.value,
                     stale=False,
                     extra_metadata={"refresh_scheduled": refresh_scheduled}
@@ -495,7 +515,7 @@ class SnapshotBuilder:
                     diagnostics=runtime.diagnostics,
                     reason="stale_while_revalidate",
                 )
-                cached = self._cache_access.cached_copy(
+                cached = await self._cache_access.cached_copy(
                     lookup.value,
                     stale=True,
                     extra_metadata={
@@ -592,7 +612,7 @@ class SnapshotBuilder:
                     resource=str(key),
                     error_type=type(error).__name__,
                 )
-                value = self._cache_access.cached_copy(
+                value = await self._cache_access.cached_copy(
                     stale_candidate,
                     stale=True,
                     extra_metadata={
@@ -756,7 +776,7 @@ class SnapshotBuilder:
                             result is not None
                             and result.status is CacheWriteStatus.IGNORED_LOWER_AUTHORITY
                         ):
-                            winning = self._cache_access.cached_copy(
+                            winning = await self._cache_access.cached_copy(
                                 result.value,
                                 stale=False,
                                 extra_metadata={"superseded_source": written.source},

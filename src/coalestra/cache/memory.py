@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from functools import partial
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import Any
 
-from coalestra.concurrency.dispatch import run_bounded
-from coalestra.core.isolation import PayloadCopier, PayloadIsolator
+from coalestra.core.isolation import (
+    AsyncPayloadIsolator,
+    PayloadCopier,
+    PayloadIsolator,
+)
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheLookup,
@@ -19,9 +21,6 @@ from coalestra.core.models import (
     SnapshotValue,
 )
 from coalestra.core.protocols import FreshnessPolicyProvider
-
-_CopyItem = TypeVar("_CopyItem")
-_CopyResult = TypeVar("_CopyResult")
 
 
 @dataclass(frozen=True)
@@ -45,46 +44,6 @@ class _CapturedWriteResult:
     status: CacheWriteStatus
     value: SnapshotValue[Any]
     previous: SnapshotValue[Any] | None
-
-
-class _AsyncPayloadCopyRunner:
-    """Run synchronous payload copies without blocking the event loop when configured."""
-
-    def __init__(self, *, run_in_thread: bool, max_concurrency: int) -> None:
-        self.run_in_thread = run_in_thread
-        self.max_concurrency = max_concurrency
-        self._limiter = asyncio.Semaphore(max_concurrency)
-
-    async def run(self, operation: Callable[[], _CopyResult]) -> _CopyResult:
-        if not self.run_in_thread:
-            return operation()
-
-        await self._limiter.acquire()
-        try:
-            worker = asyncio.create_task(asyncio.to_thread(operation))
-        except BaseException:
-            self._limiter.release()
-            raise
-
-        released = False
-
-        def release_slot(_task: asyncio.Task[_CopyResult]) -> None:
-            nonlocal released
-            if released:
-                return
-            released = True
-            if not _task.cancelled():
-                _task.exception()
-            self._limiter.release()
-
-        # A thread cannot be cancelled after it starts. Keep its capacity slot reserved
-        # until the underlying copy really finishes, even if the caller is cancelled.
-        worker.add_done_callback(release_slot)
-        try:
-            return await asyncio.shield(worker)
-        finally:
-            if worker.done():
-                release_slot(worker)
 
 
 class AsyncMemoryCache:
@@ -111,19 +70,15 @@ class AsyncMemoryCache:
             raise TypeError("max_copy_concurrency must be an integer")
         if max_copy_concurrency < 1:
             raise ValueError("max_copy_concurrency must be at least 1")
-        resolved_copy_offload = (
-            payload_copier is None
-            if run_payload_copies_in_thread is None
-            else run_payload_copies_in_thread
-        )
         self.max_entries = max_entries
-        self.run_payload_copies_in_thread = resolved_copy_offload
-        self.max_copy_concurrency = max_copy_concurrency
         self._payload_isolator = PayloadIsolator(payload_copier)
-        self._copy_runner = _AsyncPayloadCopyRunner(
-            run_in_thread=resolved_copy_offload,
+        self._async_payload_isolator = AsyncPayloadIsolator(
+            self._payload_isolator,
+            run_in_thread=run_payload_copies_in_thread,
             max_concurrency=max_copy_concurrency,
         )
+        self.run_payload_copies_in_thread = self._async_payload_isolator.run_in_thread
+        self.max_copy_concurrency = self._async_payload_isolator.max_concurrency
         self._entries: OrderedDict[ResourceKey, SnapshotValue[Any]] = OrderedDict()
         self._lock = asyncio.Lock()
         self._hits = 0
@@ -211,14 +166,17 @@ class AsyncMemoryCache:
                     age_seconds=age,
                 )
 
-        async def clone_lookup(
+        def clone_lookup(
             item: tuple[ResourceKey, CacheLookup],
         ) -> tuple[ResourceKey, CacheLookup]:
             key, lookup = item
             copied_value = (
                 None
                 if lookup.value is None
-                else await self._clone_for_caller(lookup.value, operation="cache read")
+                else self._payload_isolator.clone_snapshot_value(
+                    lookup.value,
+                    context=f"cache read for {lookup.value.key}",
+                )
             )
             return (
                 key,
@@ -230,7 +188,10 @@ class AsyncMemoryCache:
                 ),
             )
 
-        copied = await self._run_copy_batch(tuple(captured.items()), clone_lookup)
+        copied = await self._async_payload_isolator.map(
+            tuple(captured.items()),
+            clone_lookup,
+        )
         return dict(copied)
 
     async def set(self, value: SnapshotValue[Any]) -> None:
@@ -308,31 +269,33 @@ class AsyncMemoryCache:
                     self._enforce_limit_locked()
                     break
 
-            async def prepare_candidate(
+            def prepare_candidate(
                 candidate: SnapshotValue[Any],
             ) -> tuple[ResourceKey, SnapshotValue[Any]]:
-                stored = await self._clone_snapshot_value(
+                stored = self._payload_isolator.clone_snapshot_value(
                     candidate,
                     context=f"cache storage for {candidate.key}",
                 )
                 return candidate.key, stored
 
-            prepared.update(await self._run_copy_batch(tuple(missing), prepare_candidate))
+            prepared.update(
+                await self._async_payload_isolator.map(tuple(missing), prepare_candidate)
+            )
 
-        async def clone_result(
+        def clone_result(
             item: tuple[ResourceKey, _CapturedWriteResult],
         ) -> tuple[ResourceKey, CacheWriteResult]:
             key, result = item
-            copied_value = await self._clone_for_caller(
+            copied_value = self._payload_isolator.clone_snapshot_value(
                 result.value,
-                operation="cache write result",
+                context=f"cache write result for {result.value.key}",
             )
             copied_previous = (
                 None
                 if result.previous is None
-                else await self._clone_for_caller(
+                else self._payload_isolator.clone_snapshot_value(
                     result.previous,
-                    operation="cache previous value",
+                    context=f"cache previous value for {result.previous.key}",
                 )
             )
             return (
@@ -344,7 +307,10 @@ class AsyncMemoryCache:
                 ),
             )
 
-        copied_results = await self._run_copy_batch(tuple(captured.items()), clone_result)
+        copied_results = await self._async_payload_isolator.map(
+            tuple(captured.items()),
+            clone_result,
+        )
         return MappingProxyType(dict(copied_results))
 
     @staticmethod
@@ -471,46 +437,6 @@ class AsyncMemoryCache:
                 evictions=self._evictions,
                 expirations=self._expirations,
             )
-
-    async def _run_copy_batch(
-        self,
-        items: Collection[_CopyItem],
-        operation: Callable[[_CopyItem], Awaitable[_CopyResult]],
-    ) -> tuple[_CopyResult, ...]:
-        if not items:
-            return ()
-        if self.run_payload_copies_in_thread:
-            return await run_bounded(
-                items,
-                operation,
-                max_tasks=self.max_copy_concurrency,
-            )
-        return tuple([await operation(item) for item in items])
-
-    async def _clone_snapshot_value(
-        self,
-        value: SnapshotValue[Any],
-        *,
-        context: str,
-    ) -> SnapshotValue[Any]:
-        return await self._copy_runner.run(
-            partial(
-                self._payload_isolator.clone_snapshot_value,
-                value,
-                context=context,
-            )
-        )
-
-    async def _clone_for_caller(
-        self,
-        value: SnapshotValue[Any],
-        *,
-        operation: str,
-    ) -> SnapshotValue[Any]:
-        return await self._clone_snapshot_value(
-            value,
-            context=f"{operation} for {value.key}",
-        )
 
     def _dependencies_current_locked(
         self,

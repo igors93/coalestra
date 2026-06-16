@@ -53,6 +53,7 @@ Methods and properties:
 
 - `resolve(keys, strict=True, retry_errors=False) -> Snapshot`
 - `revalidate(keys, strict=True, force_refresh=False) -> Snapshot`
+- `snapshot_async() -> Snapshot`
 - `snapshot() -> Snapshot`
 - `close()`
 - `snapshot_id`
@@ -424,6 +425,10 @@ A subclass of `SnapshotBuildError` raised when participating values exceed the c
 ### Payload isolation
 
 `SnapshotBuilder`, `AsyncMemoryCache`, and `ResourcePublisher` accept an optional `payload_copier`. The default uses `copy.deepcopy` and isolates values plus nested metadata at source, cache, publication, derived-dependency, single-flight, session, and snapshot-delivery boundaries. Copy failures raise `PayloadIsolationError`. Custom copiers should return a deeply independent value unless the payload is already deeply immutable.
+
+`SnapshotBuilder` accepts `run_payload_copies_in_thread` and `max_copy_concurrency` for source, custom-cache, publisher, derived-dependency, and asynchronous snapshot-delivery boundaries. The default `None` mode offloads the built-in copier and keeps custom copiers inline. `SnapshotSession.snapshot_async()` uses this runner; the compatibility `snapshot()` method remains synchronous.
+
+Standalone `ResourcePublisher` instances accept the same two options. Builder-created publishers share the builder's copy runner, so the configured limit applies across acquisition and publication work rather than once per component.
 
 `SnapshotBuilder` accepts `cache_run_payload_copies_in_thread` and `cache_max_copy_concurrency` for the default `AsyncMemoryCache`. These settings are rejected when a custom cache is supplied so configuration cannot appear to succeed while being ignored.
 

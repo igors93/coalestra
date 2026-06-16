@@ -2,14 +2,13 @@
 
 ## Unreleased
 
+- Extended bounded payload-copy offloading beyond `AsyncMemoryCache` to source results, custom-cache boundaries, publisher preparation/results, derived dependency snapshots, and asynchronous session snapshot delivery.
+- Added one builder-wide copy-concurrency limit shared by orchestration and publisher boundaries, with cancellation-safe capacity accounting.
+- Added `SnapshotSession.snapshot_async()` so asynchronous consumers can request detached snapshots without running large copies on the event loop.
+- Preserved synchronous copy behavior for `SnapshotSession.snapshot()` and non-blocking synchronous submission capture, where no asynchronous wait point is available or the copy intentionally belongs to the producer thread.
+
 ## 0.5.7 - 2026-06-15
 
-- Moved `AsyncMemoryCache` payload and metadata copies outside its internal lock for reads, stored writes, and write results.
-- Added a two-phase atomic write path that rechecks authority and timestamp ordering after preparing storage copies.
-- Offloaded the default `copy.deepcopy` cache work to bounded worker threads so large payloads do not monopolize the event loop.
-- Kept custom payload copiers inline by default and added explicit cache and builder controls for safe threaded execution.
-- Kept copy capacity reserved until cancelled worker-thread operations actually finish.
-- Added deterministic lock-scope, event-loop responsiveness, copy-concurrency, cancellation, and concurrent-write regression tests.
 - Added opt-in observation-skew limits to `SnapshotRequest` through `SnapshotConsistencyPolicy`.
 - Added `SnapshotConsistencyError` with oldest/newest resource details and compatible partial-snapshot diagnostics.
 - Added transactional observation-skew validation to asynchronous and synchronous session revalidation.

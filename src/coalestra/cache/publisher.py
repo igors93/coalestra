@@ -12,7 +12,7 @@ from coalestra.concurrency.dispatch import run_bounded
 from coalestra.core.authority import AuthorityPolicyResolver
 from coalestra.core.errors import SourceProtocolError
 from coalestra.core.health import OperationalHealthTracker
-from coalestra.core.isolation import PayloadCopier, PayloadIsolator
+from coalestra.core.isolation import AsyncPayloadIsolator, PayloadCopier, PayloadIsolator
 from coalestra.core.keys import ResourceKey
 from coalestra.core.models import (
     CacheLookup,
@@ -102,6 +102,9 @@ class ResourcePublisher:
         lock_stripes: int = 64,
         payload_copier: PayloadCopier | None = None,
         payload_isolator: PayloadIsolator | None = None,
+        _async_payload_isolator: AsyncPayloadIsolator | None = None,
+        run_payload_copies_in_thread: bool | None = None,
+        max_copy_concurrency: int = 4,
         authority_resolver: AuthorityPolicyResolver | None = None,
         max_pending_tasks: int = _DEFAULT_MAX_PENDING_TASKS,
         health_tracker: OperationalHealthTracker | None = None,
@@ -110,6 +113,10 @@ class ResourcePublisher:
             raise ValueError("lock_stripes must be at least 1")
         if max_pending_tasks < 1:
             raise ValueError("max_pending_tasks must be at least 1")
+        if _async_payload_isolator is not None and (
+            run_payload_copies_in_thread is not None or max_copy_concurrency != 4
+        ):
+            raise ValueError("payload copy settings cannot be combined with async_payload_isolator")
         self.cache = cache
         self.clock = clock
         self.policy_resolver = policy_resolver
@@ -117,6 +124,13 @@ class ResourcePublisher:
         self.events = events
         self.observation_policy = observation_policy or ObservationPolicy()
         self._payload_isolator = payload_isolator or PayloadIsolator(payload_copier)
+        self._async_payload_isolator = _async_payload_isolator or AsyncPayloadIsolator(
+            self._payload_isolator,
+            run_in_thread=run_payload_copies_in_thread,
+            max_concurrency=max_copy_concurrency,
+        )
+        self.run_payload_copies_in_thread = self._async_payload_isolator.run_in_thread
+        self.max_copy_concurrency = self._async_payload_isolator.max_concurrency
         self.authority_resolver = authority_resolver or AuthorityPolicyResolver()
         self.max_pending_tasks = int(max_pending_tasks)
         self.health_tracker = health_tracker
@@ -217,38 +231,52 @@ class ResourcePublisher:
 
             previous_values = await self._get_existing(keys, now=now)
             provisional_results: dict[ResourceKey, PublishResult] = {}
-            candidates: list[SnapshotValue[Any]] = []
             legacy_writes: list[SnapshotValue[Any]] = []
 
-            for key, update in unique.items():
+            def prepare_candidate(
+                item: tuple[ResourceKey, ResourceUpdate[Any]],
+            ) -> tuple[ResourceKey, SnapshotValue[Any]]:
+                key, update = item
                 observed_at = now if update.observed_at is None else float(update.observed_at)
-                previous = previous_values.get(key)
                 policy = self.policy_resolver.resolve(key)
                 future_seconds = max(0.0, observed_at - now)
                 published_metadata = {**update.metadata, "published": True}
                 if future_seconds > 0:
                     published_metadata["clock_skew_seconds"] = future_seconds
-                candidate = SnapshotValue(
-                    key=key,
-                    value=self._payload_isolator.copy(
-                        update.value,
-                        context=f"published payload for {key}",
-                    ),
-                    source=update.source,
-                    observed_at=observed_at,
-                    fetched_at=now,
-                    age_seconds=max(0.0, now - observed_at),
-                    stale=max(0.0, now - observed_at) > policy.ttl_seconds,
-                    from_cache=False,
-                    latency_ms=0.0,
-                    attempts=0,
-                    authority_rank=self.authority_resolver.rank_for(key, update.source),
-                    metadata=self._payload_isolator.copy_metadata(
-                        published_metadata,
-                        context=f"published metadata for {key}",
+                return (
+                    key,
+                    SnapshotValue(
+                        key=key,
+                        value=self._payload_isolator.copy(
+                            update.value,
+                            context=f"published payload for {key}",
+                        ),
+                        source=update.source,
+                        observed_at=observed_at,
+                        fetched_at=now,
+                        age_seconds=max(0.0, now - observed_at),
+                        stale=max(0.0, now - observed_at) > policy.ttl_seconds,
+                        from_cache=False,
+                        latency_ms=0.0,
+                        attempts=0,
+                        authority_rank=self.authority_resolver.rank_for(key, update.source),
+                        metadata=self._payload_isolator.copy_metadata(
+                            published_metadata,
+                            context=f"published metadata for {key}",
+                        ),
                     ),
                 )
-                candidates.append(candidate)
+
+            candidate_items = await self._async_payload_isolator.map(
+                tuple(unique.items()),
+                prepare_candidate,
+            )
+            candidates_by_key = dict(candidate_items)
+            candidates = tuple(candidates_by_key[key] for key in unique)
+
+            for key in unique:
+                candidate = candidates_by_key[key]
+                previous = previous_values.get(key)
 
                 ignored_status = self._ignored_status(
                     previous,
@@ -284,9 +312,14 @@ class ResourcePublisher:
                 if missing:
                     rendered = ", ".join(str(key) for key in missing)
                     raise RuntimeError(f"atomic cache omitted write results for: {rendered}")
-                results = {
-                    key: self._publish_result_from_cache(atomic_results[key]) for key in unique
-                }
+                copied_results = await self._async_payload_isolator.map(
+                    tuple((key, atomic_results[key]) for key in unique),
+                    lambda item: (
+                        item[0],
+                        self._publish_result_from_cache(item[1]),
+                    ),
+                )
+                results = dict(copied_results)
 
             for key, result in results.items():
                 update = unique[key]
@@ -354,18 +387,19 @@ class ResourcePublisher:
                 health_tracker=self.health_tracker,
             )
             lookups = dict(zip(keys, completed, strict=True))
-        existing: dict[ResourceKey, SnapshotValue[Any] | None] = {}
-        for key in keys:
-            value = lookups[key].value
-            existing[key] = (
+        copied = await self._async_payload_isolator.map(
+            tuple((key, lookups[key].value) for key in keys),
+            lambda item: (
+                item[0],
                 None
-                if value is None
+                if item[1] is None
                 else self._payload_isolator.clone_snapshot_value(
-                    value,
-                    context=f"publisher cache read for {key}",
-                )
-            )
-        return existing
+                    item[1],
+                    context=f"publisher cache read for {item[0]}",
+                ),
+            ),
+        )
+        return dict(copied)
 
     async def _set_many_if_newer(
         self,
@@ -376,12 +410,12 @@ class ResourcePublisher:
     ) -> Mapping[ResourceKey, CacheWriteResult] | None:
         if not values:
             return MappingProxyType({})
-        isolated = tuple(
-            self._payload_isolator.clone_snapshot_value(
+        isolated = await self._async_payload_isolator.map(
+            tuple(values),
+            lambda value: self._payload_isolator.clone_snapshot_value(
                 value,
                 context=f"publisher cache write for {value.key}",
-            )
-            for value in values
+            ),
         )
         if isinstance(self.cache, BatchAtomicAsyncCache):
             return await self.cache.set_many_if_newer(
@@ -411,12 +445,12 @@ class ResourcePublisher:
     async def _set_many_legacy(self, values: Collection[SnapshotValue[Any]]) -> None:
         if not values:
             return
-        isolated = tuple(
-            self._payload_isolator.clone_snapshot_value(
+        isolated = await self._async_payload_isolator.map(
+            tuple(values),
+            lambda value: self._payload_isolator.clone_snapshot_value(
                 value,
                 context=f"publisher legacy cache write for {value.key}",
-            )
-            for value in values
+            ),
         )
         if isinstance(self.cache, BatchAsyncCache):
             await self.cache.set_many(isolated)
