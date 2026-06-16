@@ -35,6 +35,13 @@ class CacheStats:
     expirations: int
 
 
+@dataclass(frozen=True)
+class _CapturedWriteResult:
+    status: CacheWriteStatus
+    value: SnapshotValue[Any]
+    previous: SnapshotValue[Any] | None
+
+
 class AsyncMemoryCache:
     """Concurrency-safe LRU cache with authority-aware isolated writes."""
 
@@ -85,13 +92,13 @@ class AsyncMemoryCache:
             rendered = ", ".join(str(key) for key in missing_policies)
             raise KeyError(f"missing freshness policies for: {rendered}")
 
-        results: dict[ResourceKey, CacheLookup] = {}
+        captured: dict[ResourceKey, CacheLookup] = {}
         async with self._lock:
             for key in unique:
                 value = self._entries.get(key)
                 if value is None:
                     self._misses += 1
-                    results[key] = CacheLookup(
+                    captured[key] = CacheLookup(
                         value=None,
                         fresh=False,
                         usable_stale=False,
@@ -105,7 +112,7 @@ class AsyncMemoryCache:
                     self._entries.pop(key, None)
                     self._misses += 1
                     self._invalidations += 1
-                    results[key] = CacheLookup(
+                    captured[key] = CacheLookup(
                         value=None,
                         fresh=False,
                         usable_stale=False,
@@ -116,7 +123,7 @@ class AsyncMemoryCache:
                     self._entries.pop(key, None)
                     self._misses += 1
                     self._expirations += 1
-                    results[key] = CacheLookup(
+                    captured[key] = CacheLookup(
                         value=None,
                         fresh=False,
                         usable_stale=False,
@@ -131,13 +138,26 @@ class AsyncMemoryCache:
                     self._fresh_hits += 1
                 else:
                     self._stale_hits += 1
-                results[key] = CacheLookup(
-                    value=self._clone_for_caller(value, operation="cache read"),
+                captured[key] = CacheLookup(
+                    value=value,
                     fresh=fresh,
                     usable_stale=True,
                     age_seconds=age,
                 )
-        return results
+
+        return {
+            key: CacheLookup(
+                value=(
+                    None
+                    if lookup.value is None
+                    else self._clone_for_caller(lookup.value, operation="cache read")
+                ),
+                fresh=lookup.fresh,
+                usable_stale=lookup.usable_stale,
+                age_seconds=lookup.age_seconds,
+            )
+            for key, lookup in captured.items()
+        }
 
     async def set(self, value: SnapshotValue[Any]) -> None:
         await self.set_if_newer(value)
@@ -170,45 +190,71 @@ class AsyncMemoryCache:
         if not candidates:
             return MappingProxyType({})
 
-        results: dict[ResourceKey, CacheWriteResult] = {}
-        async with self._lock:
-            for candidate in candidates.values():
-                previous = self._entries.get(candidate.key)
-                status = self._write_status(
-                    previous,
-                    candidate,
-                    force=force,
-                    replace_equal=replace_equal,
-                )
+        prepared: dict[ResourceKey, SnapshotValue[Any]] = {}
+        captured: dict[ResourceKey, _CapturedWriteResult]
 
-                if status is CacheWriteStatus.STORED:
-                    stored = self._payload_isolator.clone_snapshot_value(
+        # Copy only candidates that currently qualify for storage, then recheck the
+        # whole batch under the lock before committing any entry.
+        while True:
+            missing: list[SnapshotValue[Any]] = []
+            async with self._lock:
+                statuses: dict[ResourceKey, CacheWriteStatus] = {}
+                for candidate in candidates.values():
+                    status = self._write_status(
+                        self._entries.get(candidate.key),
                         candidate,
-                        context=f"cache storage for {candidate.key}",
+                        force=force,
+                        replace_equal=replace_equal,
                     )
-                    self._entries[candidate.key] = stored
-                    self._entries.move_to_end(candidate.key)
-                    self._sets += 1
-                    current = stored
-                else:
-                    assert previous is not None
-                    current = previous
+                    statuses[candidate.key] = status
+                    if status is CacheWriteStatus.STORED and candidate.key not in prepared:
+                        missing.append(candidate)
 
-                results[candidate.key] = CacheWriteResult(
-                    status=status,
-                    value=self._clone_for_caller(current, operation="cache write result"),
-                    previous=(
-                        None
-                        if previous is None
-                        else self._clone_for_caller(
-                            previous,
-                            operation="cache previous value",
+                if not missing:
+                    captured = {}
+                    for candidate in candidates.values():
+                        previous = self._entries.get(candidate.key)
+                        status = statuses[candidate.key]
+                        if status is CacheWriteStatus.STORED:
+                            stored = prepared[candidate.key]
+                            self._entries[candidate.key] = stored
+                            self._entries.move_to_end(candidate.key)
+                            self._sets += 1
+                            current = stored
+                        else:
+                            assert previous is not None
+                            current = previous
+
+                        captured[candidate.key] = _CapturedWriteResult(
+                            status=status,
+                            value=current,
+                            previous=previous,
                         )
-                    ),
+
+                    self._enforce_limit_locked()
+                    break
+
+            for candidate in missing:
+                prepared[candidate.key] = self._payload_isolator.clone_snapshot_value(
+                    candidate,
+                    context=f"cache storage for {candidate.key}",
                 )
 
-            self._enforce_limit_locked()
-
+        results = {
+            key: CacheWriteResult(
+                status=result.status,
+                value=self._clone_for_caller(result.value, operation="cache write result"),
+                previous=(
+                    None
+                    if result.previous is None
+                    else self._clone_for_caller(
+                        result.previous,
+                        operation="cache previous value",
+                    )
+                ),
+            )
+            for key, result in captured.items()
+        }
         return MappingProxyType(results)
 
     @staticmethod

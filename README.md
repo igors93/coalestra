@@ -157,7 +157,7 @@ key = ResourceKey(
 
 ## Batch cache operations and refresh policies
 
-`AsyncMemoryCache` performs multi-key reads and writes under one lock, defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation. Custom caches may implement `BatchAsyncCache`; older single-key caches remain supported.
+`AsyncMemoryCache` performs LRU bookkeeping, freshness checks, and authority-aware write decisions under one lock, while payload and metadata copies run after the lock is released. Stored writes use a two-phase check so a concurrent higher-authority or newer value still wins after copy preparation. The cache defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation. Custom caches may implement `BatchAsyncCache`; older single-key caches remain supported.
 
 Freshness policies support three refresh modes:
 

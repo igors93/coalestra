@@ -229,6 +229,8 @@ The cache path mirrors source batching:
 
 Single-key custom caches remain supported through ordered fixed-worker fallbacks bounded by `max_pending_tasks`. Reads, writes, atomic writes, and invalidations therefore avoid creating one task per key. Caches implementing `BatchAsyncCache` or `BatchAtomicAsyncCache` continue to use their native bulk operations.
 
+`AsyncMemoryCache` keeps structural work inside its lock: lookup classification, dependency validation, LRU updates, authority comparison, entry replacement, and eviction. Payload and metadata isolation copies run outside the lock. Writes prepare only candidates that currently qualify for storage, then reacquire the lock and recheck the full batch before committing. This prevents slow copies from extending the critical section without weakening monotonic authority or timestamp ordering.
+
 ## Refresh state machine
 
 ```text

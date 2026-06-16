@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.8 - 2026-06-15
+
+- Moved `AsyncMemoryCache` payload and metadata copies outside its internal lock for reads, stored writes, and write results.
+- Added a two-phase atomic write path that rechecks authority and timestamp ordering after preparing storage copies.
+- Preserved rejection behavior for non-copyable candidates that lose authority or timestamp comparison and therefore never need storage.
+- Added deterministic lock-scope and concurrent-write regression tests.
+
 ## 0.5.7 - 2026-06-15
 
 - Added opt-in observation-skew limits to `SnapshotRequest` through `SnapshotConsistencyPolicy`.
