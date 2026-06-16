@@ -270,7 +270,9 @@ Additional event types include:
 - `PayloadCopySubsystemClosedError`
 - `PayloadCopyShutdownTimeoutError`
 - `PayloadIsolationError`
+- `ResourceAcceptanceError`
 - `ResourceResolutionError`
+- `SnapshotAcceptanceError`
 - `SnapshotBuildError`
 - `SnapshotConsistencyError`
 - `SessionClosedError`
@@ -407,7 +409,7 @@ Implements `MetricsSink` and exposes the same lifecycle methods.
 
 ### `SnapshotRequest`
 
-Declares required and optional keys. Use with `SnapshotBuilder.build_request`, `SnapshotSession.resolve_request`, `SyncSnapshotBuilder.build_request`, or `SyncSnapshotSession.resolve_request`. The optional `consistency_policy` applies an observation-skew limit after required-resource resolution succeeds. Required resources participate by default; `SnapshotConsistencyPolicy.include_optional_resources` can include resolved optional resources.
+Declares required and optional keys. Use with `SnapshotBuilder.build_request`, `SnapshotSession.resolve_request`, `SyncSnapshotBuilder.build_request`, or `SyncSnapshotSession.resolve_request`. The optional `consistency_policy` applies an observation-skew limit after required-resource resolution succeeds. The optional `acceptance_policy` validates current age, stale state, source authority, and declarative resource requirements. Policy references must belong to the request.
 
 ### `SnapshotConsistencyPolicy`
 
@@ -425,6 +427,41 @@ The limit must be finite and non-negative. Values exactly at the configured boun
 A subclass of `SnapshotBuildError` raised when participating values exceed the configured observation-skew limit. It preserves the partial snapshot and exposes `keys`, `oldest_key`, `oldest_observed_at`, `newest_key`, `newest_observed_at`, `observation_skew_seconds`, and `max_observation_skew_seconds`. The inherited `to_dict()` method remains compatible with error-diagnostics schema version 1.
 
 `SnapshotSession.revalidate` and `SyncSnapshotSession.revalidate` accept an optional `consistency_policy`. The policy applies to the explicitly revalidated keys. A violation is always raised as `SnapshotConsistencyError` and the previous session state remains committed.
+
+### `ResourceAcceptanceRule`
+
+```python
+ResourceAcceptanceRule(
+    max_age_seconds=None,
+    allow_stale=True,
+    minimum_authority_rank=None,
+)
+```
+
+Age is recomputed from the evaluation clock and `observed_at`; the stored acquisition-time age is retained as a lower bound. Stale state is also recomputed against the active `FreshnessPolicy`, which is important for long-lived sessions. Authority uses the stable rank already attached to `SnapshotValue`.
+
+### `SnapshotRequirement`
+
+Use `SnapshotRequirement.all_of(keys)`, `SnapshotRequirement.any_of(keys)`, or `SnapshotRequirement.at_least(count, keys)` to express mandatory groups, alternatives, and quorums. A requirement counts only resources that are both resolved and accepted by their applicable rule. A bad requirement-only alternative does not reject the snapshot when enough other alternatives satisfy the group.
+
+### `SnapshotAcceptancePolicy`
+
+```python
+SnapshotAcceptancePolicy(
+    default_rule=ResourceAcceptanceRule(max_age_seconds=3.0, allow_stale=False),
+    resource_rules={ACCOUNT: ResourceAcceptanceRule(minimum_authority_rank=200)},
+    requirements=(SnapshotRequirement.any_of([STREAM_POSITION, REST_POSITION]),),
+    include_optional_resources=False,
+)
+```
+
+The default rule applies to required request resources. Optional resources are directly enforced only when `include_optional_resources=True` or when an explicit rule exists. Requirement members are evaluated for group satisfaction without making every alternative independently mandatory. A policy must contain at least one effective constraint or requirement.
+
+### `SnapshotAcceptanceError`
+
+A subclass of `SnapshotBuildError` raised when a candidate violates an acceptance policy. It preserves the partial or previously committed snapshot, exposes a tuple of `SnapshotAcceptanceViolation` values, and serializes resource-associated failures through the existing diagnostics schema. Reasons are stable `SnapshotAcceptanceReason` values: `stale`, `too_old`, `insufficient_authority`, and `requirement_unsatisfied`.
+
+`SnapshotSession.revalidate` and `SyncSnapshotSession.revalidate` accept `acceptance_policy`. Validation happens before delivery and commit. A violation always raises `SnapshotAcceptanceError`, including when `strict=False`, and the previous session state remains committed.
 
 ### Payload isolation
 

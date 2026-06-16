@@ -2,12 +2,17 @@
 
 ## Unreleased
 
+## 0.5.9 - 2026-06-16
+
+- Added opt-in snapshot acceptance policies covering current resource age, dynamic stale state, and minimum source-authority rank.
+- Added declarative all-of, any-of, and at-least-N resource requirements for alternative and quorum-based snapshots.
+- Added per-resource rule overrides while keeping optional resources non-blocking unless explicitly included or required by a group.
+- Added `SnapshotAcceptanceError` with immutable violation details, partial-snapshot diagnostics, metrics, and structured events.
+- Applied acceptance policies transactionally to asynchronous and synchronous session revalidation so rejected candidates never replace pinned state.
+- Recomputed age and stale state at policy-evaluation time instead of trusting acquisition-time flags for long-lived sessions.
+
 ## 0.5.8 - 2026-06-15
 
-- Automatically buffered external metrics and event sinks so slow downstream I/O cannot block snapshot acquisition by default.
-- Added bounded overflow, delivery-failure, pending-work, peak-queue, and shutdown diagnostics for builder-managed observability buffers.
-- Added explicit opt-out and force-buffer controls while preserving direct execution for known non-blocking built-in sinks and avoiding double buffering.
-- Added controlled observability draining before managed downstream lifecycle shutdown, including `ObservabilityShutdownTimeoutError` and synchronous-facade late-worker handling.
 - Added bounded asynchronous payload-copy execution across cache, source, publisher, derived, and session boundaries.
 - Included payload-copy capacity waits and execution time in the absolute snapshot deadline.
 - Added `PayloadCopyHealth` and exposed current copy activity, saturation, cumulative outcomes, timeouts, and latency summaries through `BuilderHealth`.

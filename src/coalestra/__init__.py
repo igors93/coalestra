@@ -58,6 +58,8 @@ from coalestra.core import (
     PayloadIsolator,
     RefreshMode,
     ResilienceConfiguredSource,
+    ResourceAcceptanceError,
+    ResourceAcceptanceRule,
     ResourceKey,
     ResourceResolutionError,
     SerializedResourceError,
@@ -65,12 +67,17 @@ from coalestra.core import (
     SerializedSourceFailure,
     SessionClosedError,
     Snapshot,
+    SnapshotAcceptanceError,
+    SnapshotAcceptancePolicy,
+    SnapshotAcceptanceReason,
+    SnapshotAcceptanceViolation,
     SnapshotBuildError,
     SnapshotConsistencyError,
     SnapshotConsistencyPolicy,
     SnapshotDeadlineExceededError,
     SnapshotDiagnostics,
     SnapshotRequest,
+    SnapshotRequirement,
     SnapshotSource,
     SnapshotValue,
     SourceAuthorityPolicy,
@@ -117,7 +124,7 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.5.8"
+__version__ = "0.5.9"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
@@ -187,6 +194,8 @@ __all__ = [
     "RefreshMode",
     "ResilienceConfiguredSource",
     "ResiliencePolicyResolver",
+    "ResourceAcceptanceError",
+    "ResourceAcceptanceRule",
     "ResourceKey",
     "ResourcePublisher",
     "ResourceResolutionError",
@@ -197,6 +206,10 @@ __all__ = [
     "SerializedSourceFailure",
     "SessionClosedError",
     "Snapshot",
+    "SnapshotAcceptanceError",
+    "SnapshotAcceptancePolicy",
+    "SnapshotAcceptanceReason",
+    "SnapshotAcceptanceViolation",
     "SnapshotBuildError",
     "SnapshotBuilder",
     "SnapshotConsistencyError",
@@ -204,6 +217,7 @@ __all__ = [
     "SnapshotDeadlineExceededError",
     "SnapshotDiagnostics",
     "SnapshotRequest",
+    "SnapshotRequirement",
     "SnapshotSession",
     "SnapshotSource",
     "SnapshotValue",

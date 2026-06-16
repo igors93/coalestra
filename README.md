@@ -85,6 +85,53 @@ updated = await session.revalidate(
 
 A revalidation consistency failure always retains the previous session state and raises `SnapshotConsistencyError`, including when `strict=False`. Freshness and observation skew remain separate checks: freshness limits how old one value may be, while skew limits how far apart a group of values may be.
 
+### Snapshot acceptance policies
+
+`SnapshotAcceptancePolicy` declares whether a resolved snapshot is suitable for a consumer, independently from whether the sources technically returned values:
+
+```python
+from coalestra import (
+    ResourceAcceptanceRule,
+    SnapshotAcceptancePolicy,
+    SnapshotRequest,
+    SnapshotRequirement,
+)
+
+policy = SnapshotAcceptancePolicy(
+    default_rule=ResourceAcceptanceRule(
+        max_age_seconds=3.0,
+        allow_stale=False,
+        minimum_authority_rank=200,
+    ),
+    requirements=(
+        SnapshotRequirement.all_of([ACCOUNT, POSITION], name="account-state"),
+        SnapshotRequirement.any_of(
+            [USER_DATA_POSITION, REST_POSITION],
+            name="position-source",
+        ),
+    ),
+)
+
+request = SnapshotRequest(
+    required=[ACCOUNT, POSITION],
+    optional=[USER_DATA_POSITION, REST_POSITION],
+    acceptance_policy=policy,
+)
+
+snapshot = await builder.build_request(request)
+```
+
+The default rule applies to required resources. Optional resources are checked only when `include_optional_resources=True`, when they have an explicit `resource_rules` entry, or when they participate in a requirement. Requirement-only alternatives may fail individually without rejecting the snapshot when the group still has enough acceptable members. Age and stale state are recalculated at evaluation time, so pinned session values cannot remain artificially fresh.
+
+A failure raises `SnapshotAcceptanceError`, remains compatible with `SnapshotBuildError`, preserves the partial snapshot, and exposes immutable violations. Revalidation accepts the same policy and is transactional: a rejected candidate never replaces the previously committed session state.
+
+```python
+updated = await session.revalidate(
+    [POSITION, OPEN_ORDERS, ACCOUNT],
+    acceptance_policy=policy,
+)
+```
+
 ### Versioned error diagnostics
 
 `SourceFailure.to_dict()`, `ResourceResolutionError.to_dict()`, and `SnapshotBuildError.to_dict()` return a stable JSON-safe schema identified by `ERROR_DIAGNOSTICS_SCHEMA` and `ERROR_DIAGNOSTICS_SCHEMA_VERSION`. Consumers should branch on `schema_version` and ignore unknown fields so future additive changes remain compatible.
@@ -246,33 +293,22 @@ Diagnostics include requested, resolved and failed resource counts; cache hits/m
 
 ## Buffered observability
 
-`SnapshotBuilder` automatically protects the acquisition path from unknown external metrics and event sinks. Sinks that do not declare themselves non-blocking are wrapped in bounded worker-thread buffers by default:
-
-```python
-from coalestra import BufferOverflowPolicy, SnapshotBuilder
-
-builder = SnapshotBuilder(
-    sources,
-    events=file_event_sink,
-    metrics=prometheus_adapter,
-    observability_max_pending=10_000,
-    observability_overflow=BufferOverflowPolicy.DROP_OLDEST,
-    observability_shutdown_timeout_seconds=5.0,
-)
-```
-
-The automatic mode is `buffer_observability=None`. Built-in `NullEventSink`, `NullMetrics`, and `InMemoryMetrics` remain inline because they are known to be non-blocking. Existing `BufferedEventSink` and `BufferedMetricsSink` instances are not wrapped again. Set `buffer_observability=True` to force buffering or `False` to preserve direct synchronous sink calls.
-
-The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution. Builder-owned buffers are drained before managed downstream sinks are closed. `ObservabilityShutdownTimeoutError` reports a buffer that cannot stop within the configured shutdown budget.
-
-Standalone buffering remains available when a sink is used outside a builder:
+Wrap a potentially slow sink so logging or metrics export does not run on the acquisition path:
 
 ```python
 from coalestra import BufferedEventSink, BufferedMetricsSink
 
 events = BufferedEventSink(file_event_sink, max_pending=10_000)
 metrics = BufferedMetricsSink(prometheus_adapter, max_pending=10_000)
+
+builder = SnapshotBuilder(sources, events=events, metrics=metrics)
+
+# During shutdown
+events.close()
+metrics.close()
 ```
+
+The default overflow policy drops the oldest queued record. `DROP_NEWEST` and `RAISE` are also available. Delivery failures are counted and never injected into resource resolution.
 
 ### Low-cardinality metric labels
 
@@ -593,8 +629,6 @@ await builder.aclose()
 ```
 
 Standalone `AsyncMemoryCache` and `ResourcePublisher` instances close their owned copy runners through `aclose()`. Builder-created publishers share the builder runner and do not close it independently. The synchronous facade defers stopping its event loop after a shutdown timeout until late copy workers have actually finished.
-
-Observability-buffer health is also exposed through `health.observability_buffers`, with fixed `metrics` and `events` component names when buffering is active. Aggregates include `observability_pending`, `observability_peak_pending`, `observability_dropped_count`, `observability_failure_count`, `observability_shutdown_incomplete`, and `observability_shutdown_timeout_count`. These counters make downstream congestion visible without placing sink I/O back on the acquisition path.
 
 `sync_builder.health_snapshot()` adds `pending_submissions` and `max_pending_submissions` from the synchronous non-blocking publication backlog. Counters are process-local and cumulative since builder creation. The snapshot intentionally exposes aggregates only; it does not include symbols, subjects, qualifiers, or business decisions.
 

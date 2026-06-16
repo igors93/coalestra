@@ -345,7 +345,7 @@ def test_default_memory_cache_copy_respects_snapshot_deadline() -> None:
     asyncio.run(scenario())
 
 
-def test_project_version_includes_copy_health_release() -> None:
+def test_project_version_includes_snapshot_acceptance_release() -> None:
     import coalestra
 
-    assert coalestra.__version__ == "0.5.8"
+    assert coalestra.__version__ == "0.5.9"

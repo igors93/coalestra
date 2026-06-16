@@ -65,6 +65,8 @@ PublishStatus
 RefreshMode
 ResilienceConfiguredSource
 ResiliencePolicyResolver
+ResourceAcceptanceError
+ResourceAcceptanceRule
 ResourceKey
 ResourcePublisher
 ResourceResolutionError
@@ -75,6 +77,10 @@ SerializedSnapshotBuildError
 SerializedSourceFailure
 SessionClosedError
 Snapshot
+SnapshotAcceptanceError
+SnapshotAcceptancePolicy
+SnapshotAcceptanceReason
+SnapshotAcceptanceViolation
 SnapshotBuildError
 SnapshotBuilder
 SnapshotConsistencyError
@@ -82,6 +88,7 @@ SnapshotConsistencyPolicy
 SnapshotDeadlineExceededError
 SnapshotDiagnostics
 SnapshotRequest
+SnapshotRequirement
 SnapshotSession
 SnapshotSource
 SnapshotValue

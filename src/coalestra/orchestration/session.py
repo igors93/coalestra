@@ -4,6 +4,11 @@ import asyncio
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
+from coalestra.core.acceptance import (
+    SnapshotAcceptancePolicy,
+    SnapshotAcceptanceViolation,
+    find_snapshot_acceptance_violations,
+)
 from coalestra.core.consistency import (
     ObservationSkewViolation,
     SnapshotConsistencyPolicy,
@@ -12,6 +17,7 @@ from coalestra.core.consistency import (
 from coalestra.core.errors import (
     ResourceResolutionError,
     SessionClosedError,
+    SnapshotAcceptanceError,
     SnapshotBuildError,
     SnapshotConsistencyError,
     SnapshotDeadlineExceededError,
@@ -165,18 +171,30 @@ class SnapshotSession:
         if required_errors:
             raise SnapshotBuildError(required_errors, snapshot=snapshot)
 
-        policy = request.consistency_policy
-        if policy is not None:
+        consistency_policy = request.consistency_policy
+        if consistency_policy is not None:
             consistency_keys = (
-                request.keys if policy.include_optional_resources else request.required
+                request.keys if consistency_policy.include_optional_resources else request.required
             )
             violation = find_observation_skew_violation(
                 snapshot.resources,
                 consistency_keys,
-                policy,
+                consistency_policy,
             )
             if violation is not None:
                 raise self._consistency_error(violation, snapshot=snapshot)
+
+        acceptance_policy = request.acceptance_policy
+        if acceptance_policy is not None:
+            violations = self._acceptance_violations(
+                snapshot.resources,
+                required=request.required,
+                optional=request.optional,
+                policy=acceptance_policy,
+            )
+            if violations:
+                raise self._acceptance_error(violations, snapshot=snapshot)
+            self._record_acceptance_success()
         return snapshot
 
     async def revalidate(
@@ -186,6 +204,7 @@ class SnapshotSession:
         strict: bool = True,
         force_refresh: bool = False,
         consistency_policy: SnapshotConsistencyPolicy | None = None,
+        acceptance_policy: SnapshotAcceptancePolicy | None = None,
     ) -> Snapshot:
         """Refresh selected pinned resources without replacing unrelated session values.
 
@@ -198,9 +217,9 @@ class SnapshotSession:
 
         When ``strict=False`` and resource resolution fails, the returned snapshot contains the
         retained previous values plus transient errors for the failed refresh attempt. Those
-        transient errors are not persisted in the session. A declared consistency policy is an
-        invariant: an observation-skew violation always raises ``SnapshotConsistencyError`` and
-        leaves the previous session state unchanged.
+        transient errors are not persisted in the session. Declared consistency and acceptance
+        policies are invariants: a policy violation always raises its dedicated error and leaves
+        the previous session state unchanged.
         """
 
         async with self._lock:
@@ -305,6 +324,34 @@ class SnapshotSession:
                     candidate_resources[key] = values[key]
                 candidate_errors.pop(key, None)
 
+            if acceptance_policy is not None:
+                violations = self._acceptance_violations(
+                    candidate_resources,
+                    required=requested,
+                    optional=(),
+                    policy=acceptance_policy,
+                )
+                if violations:
+                    self._record_revalidation(
+                        requested=requested,
+                        affected=affected,
+                        errors={},
+                        committed=False,
+                        refreshed=0,
+                        strict=strict,
+                        force_refresh=force_refresh,
+                        acceptance_failed=True,
+                    )
+                    try:
+                        retained_snapshot = await self._snapshot_state_async(
+                            self._resources,
+                            self._errors,
+                        )
+                    except SnapshotDeadlineExceededError as error:
+                        self._record_copy_deadline(phase="session_revalidate_delivery")
+                        raise SnapshotBuildError(dict.fromkeys(requested, error)) from error
+                    raise self._acceptance_error(violations, snapshot=retained_snapshot)
+
             try:
                 snapshot = await self._snapshot_state_async(
                     candidate_resources,
@@ -327,6 +374,8 @@ class SnapshotSession:
             self._runtime.memo.update(staging_runtime.memo)
             self._resources = candidate_resources
             self._errors = candidate_errors
+            if acceptance_policy is not None:
+                self._record_acceptance_success()
             self._record_revalidation(
                 requested=requested,
                 affected=affected,
@@ -519,6 +568,7 @@ class SnapshotSession:
         strict: bool,
         force_refresh: bool,
         consistency_failed: bool = False,
+        acceptance_failed: bool = False,
     ) -> None:
         status = "success" if committed else "error"
         self._builder._health_tracker.record_revalidation(failed=not committed)
@@ -538,7 +588,55 @@ class SnapshotSession:
             strict=strict,
             force_refresh=force_refresh,
             consistency_failed=consistency_failed,
+            acceptance_failed=acceptance_failed,
         )
+
+    def _acceptance_violations(
+        self,
+        resources: Mapping[ResourceKey, SnapshotValue[object]],
+        *,
+        required: Iterable[ResourceKey],
+        optional: Iterable[ResourceKey],
+        policy: SnapshotAcceptancePolicy,
+    ) -> tuple[SnapshotAcceptanceViolation, ...]:
+        return find_snapshot_acceptance_violations(
+            resources,
+            required_keys=required,
+            optional_keys=optional,
+            policy=policy,
+            now=self._builder.clock.now(),
+            freshness_policy_for=self._builder.policy_resolver.resolve,
+        )
+
+    def _record_acceptance_success(self) -> None:
+        self._builder.metrics.increment(
+            "snapshot_acceptance_total",
+            status="success",
+        )
+
+    def _acceptance_error(
+        self,
+        violations: tuple[SnapshotAcceptanceViolation, ...],
+        *,
+        snapshot: Snapshot,
+    ) -> SnapshotAcceptanceError:
+        reasons = tuple(sorted({violation.reason.value for violation in violations}))
+        self._builder.metrics.increment(
+            "snapshot_acceptance_total",
+            status="error",
+        )
+        for reason in reasons:
+            self._builder.metrics.increment(
+                "snapshot_acceptance_violation_total",
+                reason=reason,
+            )
+        self._builder.events.emit(
+            "snapshot_acceptance_failed",
+            snapshot_id=self.snapshot_id,
+            violations=len(violations),
+            reasons=",".join(reasons),
+        )
+        return SnapshotAcceptanceError(violations=violations, snapshot=snapshot)
 
     def _consistency_error(
         self,

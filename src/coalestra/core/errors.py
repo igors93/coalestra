@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from coalestra.core.acceptance import SnapshotAcceptanceViolation
 from coalestra.core.diagnostic_schema import (
     ERROR_DIAGNOSTICS_SCHEMA,
     ERROR_DIAGNOSTICS_SCHEMA_VERSION,
@@ -129,6 +130,22 @@ class ObservabilityShutdownTimeoutError(CoalestraError):
             "Observability buffers did not stop within "
             f"{self.timeout_seconds:.3f}s (pending: {rendered})"
         )
+
+
+class ResourceAcceptanceError(CoalestraError):
+    """Describe acceptance-policy violations associated with one resource key."""
+
+    def __init__(
+        self,
+        key: ResourceKey,
+        violations: tuple[SnapshotAcceptanceViolation, ...],
+    ) -> None:
+        if not violations:
+            raise ValueError("resource acceptance error requires at least one violation")
+        self.key = key
+        self.violations = violations
+        summary = "; ".join(violation.message for violation in violations)
+        super().__init__(f"Resource {key} was not accepted: {summary}")
 
 
 class SourceProtocolError(CoalestraError):
@@ -400,4 +417,32 @@ class SnapshotConsistencyError(SnapshotBuildError):
             f"{self.max_observation_skew_seconds:.6f}s across {len(self.keys)} resource(s); "
             f"oldest={self.oldest_key}@{self.oldest_observed_at:.6f}, "
             f"newest={self.newest_key}@{self.newest_observed_at:.6f}",
+        )
+
+
+class SnapshotAcceptanceError(SnapshotBuildError):
+    """Raised when a resolved snapshot violates a declared acceptance policy."""
+
+    def __init__(
+        self,
+        *,
+        violations: tuple[SnapshotAcceptanceViolation, ...],
+        snapshot: Any | None = None,
+    ) -> None:
+        if not violations:
+            raise ValueError("snapshot acceptance error requires at least one violation")
+        self.violations = violations
+        grouped: dict[ResourceKey, list[SnapshotAcceptanceViolation]] = {}
+        for violation in violations:
+            for key in violation.keys:
+                grouped.setdefault(key, []).append(violation)
+        self.errors = {
+            key: ResourceAcceptanceError(key, tuple(key_violations))
+            for key, key_violations in grouped.items()
+        }
+        self.snapshot = snapshot
+        reasons = ", ".join(sorted({violation.reason.value for violation in violations}))
+        CoalestraError.__init__(
+            self,
+            f"Snapshot acceptance failed with {len(violations)} violation(s): {reasons}",
         )

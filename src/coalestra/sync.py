@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any, TypeVar
 
 from coalestra.cache.publisher import PublishResult, ResourcePublisher, ResourceUpdate
+from coalestra.core.acceptance import SnapshotAcceptancePolicy
 from coalestra.core.consistency import SnapshotConsistencyPolicy
 from coalestra.core.errors import (
     ObservabilityShutdownTimeoutError,
@@ -254,6 +255,7 @@ class SyncSnapshotSession:
         strict: bool = True,
         force_refresh: bool = False,
         consistency_policy: SnapshotConsistencyPolicy | None = None,
+        acceptance_policy: SnapshotAcceptancePolicy | None = None,
     ) -> Snapshot:
         """Refresh selected pinned resources transactionally."""
 
@@ -264,6 +266,7 @@ class SyncSnapshotSession:
                 strict=strict,
                 force_refresh=force_refresh,
                 consistency_policy=consistency_policy,
+                acceptance_policy=acceptance_policy,
             )
         )
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coalestra"
-version = "0.5.8"
+version = "0.5.9"
 description = "Integration-ready consistent snapshots with bounded dispatch, precise deadlines, resilient caching, and fast local sources."
 readme = "README.md"
 requires-python = ">=3.10"
