@@ -350,7 +350,7 @@ Additional methods:
 - `prune(*, now, policy_resolver)`
 - `stats() -> CacheStats`
 
-The default maximum size is 10,000 entries. `None` keeps it unbounded.
+The default maximum size is 10,000 entries. `None` keeps it unbounded. The constructor also accepts `run_payload_copies_in_thread` and `max_copy_concurrency`. With the default `None` mode, built-in `copy.deepcopy` work is offloaded while custom copiers remain inline. Set the boolean explicitly to override that automatic choice. Threaded copies use bounded concurrency and retain their capacity slot until the underlying worker finishes, including after caller cancellation.
 
 ### Refresh
 
@@ -424,6 +424,8 @@ A subclass of `SnapshotBuildError` raised when participating values exceed the c
 ### Payload isolation
 
 `SnapshotBuilder`, `AsyncMemoryCache`, and `ResourcePublisher` accept an optional `payload_copier`. The default uses `copy.deepcopy` and isolates values plus nested metadata at source, cache, publication, derived-dependency, single-flight, session, and snapshot-delivery boundaries. Copy failures raise `PayloadIsolationError`. Custom copiers should return a deeply independent value unless the payload is already deeply immutable.
+
+`SnapshotBuilder` accepts `cache_run_payload_copies_in_thread` and `cache_max_copy_concurrency` for the default `AsyncMemoryCache`. These settings are rejected when a custom cache is supplied so configuration cannot appear to succeed while being ignored.
 
 ### `ObservationPolicy`
 

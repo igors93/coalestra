@@ -231,6 +231,8 @@ Single-key custom caches remain supported through ordered fixed-worker fallbacks
 
 `AsyncMemoryCache` keeps structural work inside its lock: lookup classification, dependency validation, LRU updates, authority comparison, entry replacement, and eviction. Payload and metadata isolation copies run outside the lock. Writes prepare only candidates that currently qualify for storage, then reacquire the lock and recheck the full batch before committing. This prevents slow copies from extending the critical section without weakening monotonic authority or timestamp ordering.
 
+The built-in `copy.deepcopy` path runs through bounded `asyncio.to_thread` workers by default. A per-cache semaphore limits active copies, and fixed-worker batch dispatch prevents one large cache operation from creating one task per resource. If a caller is cancelled after a worker thread starts, the thread continues because Python cannot terminate it safely; its semaphore slot remains reserved until completion. Custom payload copiers remain inline unless threaded execution is explicitly enabled, preserving compatibility with thread-affine implementations.
+
 ## Refresh state machine
 
 ```text

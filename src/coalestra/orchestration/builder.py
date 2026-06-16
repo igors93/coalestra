@@ -94,6 +94,8 @@ class SnapshotBuilder:
         source_support_cache_max_entries: int | None = 100_000,
         manage_lifecycle: bool = False,
         payload_copier: PayloadCopier | None = None,
+        cache_run_payload_copies_in_thread: bool | None = None,
+        cache_max_copy_concurrency: int = 4,
     ) -> None:
         if authority_policy is not None and authority_resolver is not None:
             raise ValueError("authority_policy and authority_resolver cannot be provided together")
@@ -107,6 +109,22 @@ class SnapshotBuilder:
             raise ValueError("max_pending_tasks must be at least 1 or None")
         if source_support_cache_max_entries is not None and source_support_cache_max_entries < 1:
             raise ValueError("source_support_cache_max_entries must be at least 1 or None")
+        if cache_run_payload_copies_in_thread is not None and not isinstance(
+            cache_run_payload_copies_in_thread, bool
+        ):
+            raise TypeError("cache_run_payload_copies_in_thread must be a boolean or None")
+        if isinstance(cache_max_copy_concurrency, bool) or not isinstance(
+            cache_max_copy_concurrency, int
+        ):
+            raise TypeError("cache_max_copy_concurrency must be an integer")
+        if cache_max_copy_concurrency < 1:
+            raise ValueError("cache_max_copy_concurrency must be at least 1")
+        if cache is not None and (
+            cache_run_payload_copies_in_thread is not None or cache_max_copy_concurrency != 4
+        ):
+            raise ValueError(
+                "cache payload copy settings apply only to the default AsyncMemoryCache"
+            )
 
         self.clock = clock or SystemClock()
         default = default_policy or FreshnessPolicy(
@@ -116,7 +134,11 @@ class SnapshotBuilder:
         self.policy_resolver = policy_resolver or PolicyResolver(default)
         self.authority_resolver = authority_resolver or AuthorityPolicyResolver(authority_policy)
         self._payload_isolator = PayloadIsolator(payload_copier)
-        self.cache = cache or AsyncMemoryCache(payload_copier=payload_copier)
+        self.cache = cache or AsyncMemoryCache(
+            payload_copier=payload_copier,
+            run_payload_copies_in_thread=cache_run_payload_copies_in_thread,
+            max_copy_concurrency=cache_max_copy_concurrency,
+        )
         self.single_flight = single_flight or SingleFlight()
         self.retry_policy = retry_policy or RetryPolicy()
         self.circuit_breaker = circuit_breaker or CircuitBreaker(clock=self.clock)

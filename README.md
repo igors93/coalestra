@@ -157,7 +157,7 @@ key = ResourceKey(
 
 ## Batch cache operations and refresh policies
 
-`AsyncMemoryCache` performs LRU bookkeeping, freshness checks, and authority-aware write decisions under one lock, while payload and metadata copies run after the lock is released. Stored writes use a two-phase check so a concurrent higher-authority or newer value still wins after copy preparation. The cache defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation. Custom caches may implement `BatchAsyncCache`; older single-key caches remain supported.
+`AsyncMemoryCache` keeps freshness checks, dependency validation, LRU bookkeeping, and authority-aware commit decisions under its internal lock. Payload and metadata copies run after the lock is released. The default `copy.deepcopy` copier is also executed through bounded worker threads, preventing a large copy from monopolizing the event loop. Custom copiers remain inline by default because they may depend on thread affinity; set `run_payload_copies_in_thread=True` only when a custom copier is thread-safe. The cache defaults to a bounded 10,000-entry LRU, removes fully expired entries on access, and exposes statistics and namespace invalidation.
 
 Freshness policies support three refresh modes:
 
@@ -193,6 +193,26 @@ builder = SnapshotBuilder(
 ```
 
 `AsyncMemoryCache` and standalone `ResourcePublisher` instances accept the same `payload_copier` option. Returning the original object from a custom copier is safe only when the payload is deeply immutable.
+
+Large default cache copies are offloaded automatically. Thread-safe custom copiers can opt in explicitly, with bounded concurrency:
+
+```python
+from coalestra import AsyncMemoryCache, SnapshotBuilder
+
+cache = AsyncMemoryCache(
+    payload_copier=custom_copier,
+    run_payload_copies_in_thread=True,
+    max_copy_concurrency=2,
+)
+
+builder = SnapshotBuilder(
+    sources,
+    cache_run_payload_copies_in_thread=True,
+    cache_max_copy_concurrency=2,
+)
+```
+
+The builder settings apply only when it creates its default `AsyncMemoryCache`. When a custom cache is supplied, configure that cache directly. Cancellation does not stop a Python thread that has already started; Coalestra therefore keeps the copy-capacity slot reserved until the underlying copy finishes.
 
 ## Source authority
 
