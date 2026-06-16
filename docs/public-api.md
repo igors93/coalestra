@@ -102,9 +102,12 @@ A source may expose:
 ```python
 max_concurrency: int | None
 resilience_policy: SourceResiliencePolicy | None
+blocking_io: bool
+blocking_io_offloaded: bool
+transport_timeout_seconds: float | None
 ```
 
-Callable adapters accept both as constructor arguments.
+Callable adapters accept the concurrency, resilience, and timeout-safety options as constructor arguments. A blocking source is protected only when it runs outside the event loop and declares a finite transport timeout strictly smaller than its configured Coalestra source timeout. The declaration is contractual and must match the real client configuration.
 
 ## Callable adapters
 
@@ -112,7 +115,7 @@ Callable adapters accept both as constructor arguments.
 - `CallableBatchSource`
 - `CallableDerivedSource`
 
-Each accepts synchronous or asynchronous callables. Synchronous functions run in worker threads.
+Each accepts synchronous or asynchronous callables. Synchronous functions run in worker threads. Use `blocking_io=True` plus `transport_timeout_seconds=...` for network, database, filesystem, or other calls that may block. Unsafe blocking declarations are rejected by default.
 
 ## Capacity
 

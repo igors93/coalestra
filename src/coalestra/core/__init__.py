@@ -84,6 +84,7 @@ from coalestra.core.protocols import (
     BatchAtomicAsyncCache,
     BatchSizedSource,
     BatchSnapshotSource,
+    BlockingSourceTimeoutConfigured,
     Clock,
     ConcurrencyLimitedSource,
     DerivedSource,
@@ -97,6 +98,11 @@ from coalestra.core.protocols import (
 )
 from coalestra.core.quality import ObservationPolicy
 from coalestra.core.request import SnapshotRequest
+from coalestra.core.source_timeout import (
+    SourceTimeoutGuarantee,
+    SourceTimeoutGuaranteeStatus,
+    inspect_source_timeout_guarantee,
+)
 
 __all__ = [
     "BUILDER_HEALTH_ASSESSMENT_SCHEMA",
@@ -118,6 +124,7 @@ __all__ = [
     "BatchAtomicAsyncCache",
     "BatchSizedSource",
     "BatchSnapshotSource",
+    "BlockingSourceTimeoutConfigured",
     "BuilderHealth",
     "BuilderHealthAssessment",
     "BuilderHealthAssessmentPolicy",
@@ -181,8 +188,11 @@ __all__ = [
     "SourceProtocolError",
     "SourceQueueTimeoutError",
     "SourceTimeoutError",
+    "SourceTimeoutGuarantee",
+    "SourceTimeoutGuaranteeStatus",
     "SourceUnavailableError",
     "SubmissionBacklogFullError",
     "SystemClock",
     "deepcopy_payload",
+    "inspect_source_timeout_guarantee",
 ]

@@ -13,6 +13,7 @@ BatchAsyncCache
 BatchAtomicAsyncCache
 BatchSizedSource
 BatchSnapshotSource
+BlockingSourceTimeoutConfigured
 BufferOverflowPolicy
 BufferedEventSink
 BufferedMetricsSink
@@ -108,6 +109,8 @@ SourceProtocolError
 SourceQueueTimeoutError
 SourceResiliencePolicy
 SourceTimeoutError
+SourceTimeoutGuarantee
+SourceTimeoutGuaranteeStatus
 SourceUnavailableError
 SubmissionBacklogFullError
 SyncResourcePublisher
@@ -115,3 +118,4 @@ SyncSnapshotBuilder
 SyncSnapshotSession
 __version__
 deepcopy_payload
+inspect_source_timeout_guarantee

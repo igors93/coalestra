@@ -86,6 +86,15 @@ class ResilienceConfiguredSource(Protocol):
     resilience_policy: Any
 
 
+@runtime_checkable
+class BlockingSourceTimeoutConfigured(Protocol):
+    """Optional source capability declaring bounded synchronous blocking I/O."""
+
+    blocking_io: bool
+    blocking_io_offloaded: bool
+    transport_timeout_seconds: float | None
+
+
 Source = SnapshotSource | BatchSnapshotSource | DerivedSource
 
 

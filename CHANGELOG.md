@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Replaced the staged session deadline regression with a deterministic manual clock so platform scheduling cannot consume the first-stage budget.
+- Added explicit timeout-safety declarations for synchronous blocking sources, including transport budgets, thread-offload validation, strict migration mode, and health diagnostics.
+- Prevented protected blocking calls from starting when the remaining snapshot/source budget cannot contain the declared transport timeout.
 
 ## 0.5.9 - 2026-06-16
 

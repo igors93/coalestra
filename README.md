@@ -537,6 +537,30 @@ The available non-blocking methods are `submit_publish()`, `submit_publish_updat
 
 Synchronous fetchers and derivation functions run in worker threads by default. `run_sync_in_thread=False` is available only for guaranteed non-blocking local reads. Transport-level timeouts remain necessary because an already-running Python thread cannot be forcibly terminated. Closing the synchronous facade closes its underlying builder by default.
 
+### Blocking-source timeout guarantees
+
+Synchronous network, database, filesystem, or SDK calls should declare `blocking_io=True` and the maximum transport-level timeout actually enforced by the downstream client:
+
+```python
+rest_source = CallableSource(
+    name="rest",
+    priority=10,
+    supports=lambda key: key.namespace == "market",
+    fetcher=fetch_from_rest_client,
+    timeout_seconds=2.0,
+    blocking_io=True,
+    transport_timeout_seconds=1.75,
+)
+```
+
+The declaration is a contract: Coalestra cannot inspect a third-party client to prove that it applies the timeout. The transport timeout must be strictly smaller than the configured source timeout, and blocking work must be offloaded from the event loop. Unsafe declarations fail builder construction by default. `allow_unsafe_blocking_sources=True` is available only for controlled migration and makes health critical.
+
+Before starting a protected blocking call, Coalestra compares the declared transport timeout with the effective source/deadline budget. If the remaining budget is too small, the call is rejected before a worker thread starts. This prevents work that is already guaranteed to finish too late from consuming capacity.
+
+Custom sources may expose `blocking_io`, `blocking_io_offloaded`, and `transport_timeout_seconds`. Set `require_source_timeout_declarations=True` on the builder to reject legacy custom sources that do not declare the capability. Standard callable adapters always declare it and default to non-blocking unless explicitly marked.
+
+Timeout declarations are visible through `health.source_timeout_guarantees`, with aggregate protected, unsafe, blocking, and undeclared counts.
+
 ## Operational health
 
 `await builder.health_snapshot()` returns an immutable, aggregated view without calling any source. In addition to cache, circuit, refresh, capacity, and single-flight state, it reports current dispatch workers and capacity waiters plus cumulative timeout and session-revalidation counters.
@@ -600,7 +624,7 @@ print(payload["assessment"]["severity"])
 previous = health
 ```
 
-`BuilderHealth.assess()` returns `BuilderHealthAssessment` with one of three stable severities: `healthy`, `degraded`, or `critical`. Current-state checks cover closed builders, capacity waiters, submission and observability backlog ratios, open or half-open circuits, stopped observability workers, and incomplete shutdowns. Cumulative counters are assessed only when a previous snapshot is supplied; this reports new failures without making one historical timeout permanently degrade every later health sample.
+`BuilderHealth.assess()` returns `BuilderHealthAssessment` with one of three stable severities: `healthy`, `degraded`, or `critical`. Current-state checks cover closed builders, unsafe blocking-source declarations, capacity waiters, submission and observability backlog ratios, open or half-open circuits, stopped observability workers, and incomplete shutdowns. Cumulative counters are assessed only when a previous snapshot is supplied; this reports new failures without making one historical timeout permanently degrade every later health sample.
 
 ```python
 assessment = health.assess(previous=previous)

@@ -7,6 +7,11 @@ from typing import Literal
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.models import ResourceKey
 from coalestra.core.protocols import Source, SourceBase
+from coalestra.core.source_timeout import (
+    SourceTimeoutGuarantee,
+    SourceTimeoutGuaranteeStatus,
+    inspect_source_timeout_guarantee,
+)
 from coalestra.resilience.circuit_breaker import CircuitBreaker, CircuitIdentity
 from coalestra.resilience.policy import ResiliencePolicyResolver, SourceResiliencePolicy
 
@@ -24,21 +29,47 @@ class SourceCatalog:
         circuit_breaker: CircuitBreaker,
         cache_supports: bool,
         support_cache_max_entries: int | None,
+        require_timeout_declarations: bool,
+        allow_unsafe_blocking_sources: bool,
     ) -> None:
         source_list = list(sources)
         if not source_list:
             raise ValueError("at least one source is required")
         if support_cache_max_entries is not None and support_cache_max_entries < 1:
             raise ValueError("source_support_cache_max_entries must be at least 1 or None")
+        if not isinstance(require_timeout_declarations, bool):
+            raise TypeError("require_timeout_declarations must be a boolean")
+        if not isinstance(allow_unsafe_blocking_sources, bool):
+            raise TypeError("allow_unsafe_blocking_sources must be a boolean")
 
         names = [source.name for source in source_list]
         if len(names) != len(set(names)):
             raise ValueError("source names must be unique")
+        timeout_guarantees: dict[str, SourceTimeoutGuarantee] = {}
         for source in source_list:
             self._validate_source(source)
+            guarantee = inspect_source_timeout_guarantee(source)
+            if require_timeout_declarations and not guarantee.declaration_present:
+                raise ValueError(
+                    f"source {source.name} must explicitly declare blocking_io, "
+                    "blocking_io_offloaded, and transport_timeout_seconds"
+                )
+            if (
+                guarantee.blocking_io
+                and guarantee.status is not SourceTimeoutGuaranteeStatus.PROTECTED
+                and not allow_unsafe_blocking_sources
+            ):
+                raise ValueError(
+                    f"source {source.name} has unsafe blocking I/O timeout configuration: "
+                    f"{guarantee.status.value}"
+                )
+            timeout_guarantees[source.name] = guarantee
 
         self.sources = tuple(sorted(source_list, key=lambda item: item.priority, reverse=True))
         self.kinds = {source.name: self._source_kind(source) for source in self.sources}
+        self.timeout_guarantees = {
+            source.name: timeout_guarantees[source.name] for source in self.sources
+        }
         self.resilience_resolver = resilience_resolver
         self.circuit_breaker = circuit_breaker
         self.cache_supports = bool(cache_supports)
@@ -56,6 +87,11 @@ class SourceCatalog:
 
     def kind(self, source: SourceBase) -> SourceKind:
         return self.kinds[source.name]
+
+    def timeout_guarantee(self, source: SourceBase) -> SourceTimeoutGuarantee:
+        """Return the validated timeout-safety declaration for one source."""
+
+        return self.timeout_guarantees[source.name]
 
     def supports(
         self,

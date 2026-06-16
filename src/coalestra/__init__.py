@@ -38,6 +38,7 @@ from coalestra.core import (
     BatchAtomicAsyncCache,
     BatchSizedSource,
     BatchSnapshotSource,
+    BlockingSourceTimeoutConfigured,
     BuilderHealth,
     BuilderHealthAssessment,
     BuilderHealthAssessmentPolicy,
@@ -95,9 +96,12 @@ from coalestra.core import (
     SourceProtocolError,
     SourceQueueTimeoutError,
     SourceTimeoutError,
+    SourceTimeoutGuarantee,
+    SourceTimeoutGuaranteeStatus,
     SourceUnavailableError,
     SubmissionBacklogFullError,
     deepcopy_payload,
+    inspect_source_timeout_guarantee,
 )
 from coalestra.observability import (
     BufferedEventSink,
@@ -156,6 +160,7 @@ __all__ = [
     "BatchAtomicAsyncCache",
     "BatchSizedSource",
     "BatchSnapshotSource",
+    "BlockingSourceTimeoutConfigured",
     "BufferOverflowPolicy",
     "BufferedEventSink",
     "BufferedMetricsSink",
@@ -246,6 +251,8 @@ __all__ = [
     "SourceQueueTimeoutError",
     "SourceResiliencePolicy",
     "SourceTimeoutError",
+    "SourceTimeoutGuarantee",
+    "SourceTimeoutGuaranteeStatus",
     "SourceUnavailableError",
     "SubmissionBacklogFullError",
     "SyncResourcePublisher",
@@ -253,4 +260,5 @@ __all__ = [
     "SyncSnapshotSession",
     "__version__",
     "deepcopy_payload",
+    "inspect_source_timeout_guarantee",
 ]

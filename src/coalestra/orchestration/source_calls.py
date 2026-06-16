@@ -29,6 +29,10 @@ from coalestra.core.protocols import (
     SourceBase,
 )
 from coalestra.core.quality import ObservationPolicy
+from coalestra.core.source_timeout import (
+    SourceTimeoutGuarantee,
+    SourceTimeoutGuaranteeStatus,
+)
 from coalestra.orchestration.policy import PolicyResolver
 from coalestra.orchestration.runtime import ResolutionRuntime
 from coalestra.resilience.circuit_breaker import CircuitBreaker
@@ -64,6 +68,7 @@ class SourceCalls:
         payload_isolator: PayloadIsolator,
         async_payload_isolator: AsyncPayloadIsolator,
         authority_resolver: AuthorityPolicyResolver,
+        source_timeout_guarantees: Mapping[str, SourceTimeoutGuarantee],
     ) -> None:
         self.clock = clock
         self.capacity = capacity
@@ -75,6 +80,7 @@ class SourceCalls:
         self.payload_isolator = payload_isolator
         self.async_payload_isolator = async_payload_isolator
         self.authority_resolver = authority_resolver
+        self.source_timeout_guarantees = dict(source_timeout_guarantees)
 
     async def fetch_once(
         self,
@@ -253,6 +259,11 @@ class SourceCalls:
             phase="calling the source",
             resource=resource,
         )
+        self._ensure_transport_timeout_fits_budget(
+            source,
+            budget=budget,
+            resource=resource,
+        )
         try:
             return await self._await_with_timeout(
                 operation,
@@ -268,6 +279,46 @@ class SourceCalls:
             raise SourceTimeoutError(
                 f"source {source.name} timed out after {budget.seconds:.3f}s{target}"
             ) from error
+
+    def _ensure_transport_timeout_fits_budget(
+        self,
+        source: SourceBase,
+        *,
+        budget: _TimeoutBudget,
+        resource: ResourceKey | None,
+    ) -> None:
+        guarantee = self.source_timeout_guarantees.get(source.name)
+        if (
+            guarantee is None
+            or guarantee.status is not SourceTimeoutGuaranteeStatus.PROTECTED
+            or guarantee.transport_timeout_seconds is None
+            or budget.seconds is None
+            or guarantee.transport_timeout_seconds < budget.seconds
+        ):
+            return
+
+        target = self._target_suffix(resource)
+        self.metrics.increment(
+            "source_transport_budget_rejection_total",
+            source=source.name,
+            reason="snapshot_deadline" if budget.limited_by_deadline else "source_timeout",
+        )
+        self.events.emit(
+            "source_transport_budget_rejected",
+            source=source.name,
+            resource=str(resource) if resource is not None else "",
+            transport_timeout_seconds=guarantee.transport_timeout_seconds,
+            available_budget_seconds=budget.seconds,
+        )
+        if budget.limited_by_deadline:
+            raise SnapshotDeadlineExceededError(
+                "snapshot deadline budget is shorter than the declared transport timeout "
+                f"for source {source.name}{target}"
+            )
+        raise SourceTimeoutError(
+            "source timeout budget is not greater than the declared transport timeout "
+            f"for source {source.name}{target}"
+        )
 
     def effective_timeout(
         self,

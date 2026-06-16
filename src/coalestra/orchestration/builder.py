@@ -40,6 +40,7 @@ from coalestra.core.models import (
 from coalestra.core.protocols import AsyncCache, Clock, EventSink, MetricsSink, Source
 from coalestra.core.quality import ObservationPolicy
 from coalestra.core.request import SnapshotRequest
+from coalestra.core.source_timeout import SourceTimeoutGuaranteeStatus
 from coalestra.observability.buffered import (
     BufferedEventSink,
     BufferedMetricsSink,
@@ -118,6 +119,8 @@ class SnapshotBuilder:
         observability_overflow: BufferOverflowPolicy = BufferOverflowPolicy.DROP_OLDEST,
         observability_shutdown_timeout_seconds: float = 5.0,
         observability_drain_on_shutdown: bool = True,
+        require_source_timeout_declarations: bool = False,
+        allow_unsafe_blocking_sources: bool = False,
     ) -> None:
         if authority_policy is not None and authority_resolver is not None:
             raise ValueError("authority_policy and authority_resolver cannot be provided together")
@@ -173,6 +176,10 @@ class SnapshotBuilder:
             raise ValueError("observability_shutdown_timeout_seconds must be positive")
         if not isinstance(observability_drain_on_shutdown, bool):
             raise TypeError("observability_drain_on_shutdown must be a boolean")
+        if not isinstance(require_source_timeout_declarations, bool):
+            raise TypeError("require_source_timeout_declarations must be a boolean")
+        if not isinstance(allow_unsafe_blocking_sources, bool):
+            raise TypeError("allow_unsafe_blocking_sources must be a boolean")
         if cache is not None and (
             cache_run_payload_copies_in_thread is not None or cache_max_copy_concurrency != 4
         ):
@@ -227,6 +234,8 @@ class SnapshotBuilder:
         self.cache_source_support = bool(cache_source_support)
         self.source_support_cache_max_entries = source_support_cache_max_entries
         self.manage_lifecycle = bool(manage_lifecycle)
+        self.require_source_timeout_declarations = require_source_timeout_declarations
+        self.allow_unsafe_blocking_sources = allow_unsafe_blocking_sources
         self.max_concurrency = int(max_concurrency)
         self.max_pending_tasks = (
             self.max_concurrency if max_pending_tasks is None else int(max_pending_tasks)
@@ -239,6 +248,8 @@ class SnapshotBuilder:
             circuit_breaker=self.circuit_breaker,
             cache_supports=self.cache_source_support,
             support_cache_max_entries=self.source_support_cache_max_entries,
+            require_timeout_declarations=self.require_source_timeout_declarations,
+            allow_unsafe_blocking_sources=self.allow_unsafe_blocking_sources,
         )
         self.sources = self._source_catalog.sources
         self._source_kinds = self._source_catalog.kinds
@@ -282,6 +293,7 @@ class SnapshotBuilder:
             payload_isolator=self._payload_isolator,
             async_payload_isolator=self._async_payload_isolator,
             authority_resolver=self.authority_resolver,
+            source_timeout_guarantees=self._source_catalog.timeout_guarantees,
         )
         self._source_executor = SourceExecutor(
             source_catalog=self._source_catalog,
@@ -403,6 +415,7 @@ class SnapshotBuilder:
             copy_components["cache"] = cache_copy_health
 
         observability_buffers = self._observability_buffer_stats()
+        timeout_guarantees = self._source_catalog.timeout_guarantees
         capacity = await self.capacity.snapshot()
         operational = self._health_tracker.snapshot()
         return BuilderHealth(
@@ -420,6 +433,21 @@ class SnapshotBuilder:
             deadline_exceeded_count=operational.deadline_exceeded_count,
             revalidation_attempt_count=operational.revalidation_attempt_count,
             revalidation_failure_count=operational.revalidation_failure_count,
+            source_timeout_guarantees=timeout_guarantees,
+            blocking_source_count=sum(
+                guarantee.blocking_io for guarantee in timeout_guarantees.values()
+            ),
+            protected_blocking_source_count=sum(
+                guarantee.status is SourceTimeoutGuaranteeStatus.PROTECTED
+                for guarantee in timeout_guarantees.values()
+            ),
+            unsafe_blocking_source_count=sum(
+                guarantee.blocking_io and not guarantee.protected
+                for guarantee in timeout_guarantees.values()
+            ),
+            undeclared_source_timeout_count=sum(
+                not guarantee.declaration_present for guarantee in timeout_guarantees.values()
+            ),
             payload_copy_components=copy_components,
             active_payload_copies=sum(
                 snapshot.active_copies for snapshot in copy_components.values()

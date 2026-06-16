@@ -8,6 +8,8 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from coalestra.core.source_timeout import SourceTimeoutGuarantee
+
 BUILDER_HEALTH_SCHEMA = "coalestra.builder-health"
 BUILDER_HEALTH_SCHEMA_VERSION = 1
 BUILDER_HEALTH_ASSESSMENT_SCHEMA = "coalestra.builder-health-assessment"
@@ -45,6 +47,7 @@ class BuilderHealthReason(str, Enum):
     OBSERVABILITY_DROPS_INCREASED = "observability_drops_increased"
     OBSERVABILITY_SHUTDOWN_TIMEOUTS_INCREASED = "observability_shutdown_timeouts_increased"
     OBSERVABILITY_FAILURES_INCREASED = "observability_failures_increased"
+    UNSAFE_BLOCKING_SOURCE = "unsafe_blocking_source"
 
 
 @dataclass(frozen=True)
@@ -352,6 +355,11 @@ class BuilderHealth:
     deadline_exceeded_count: int = 0
     revalidation_attempt_count: int = 0
     revalidation_failure_count: int = 0
+    source_timeout_guarantees: Mapping[str, SourceTimeoutGuarantee] = field(default_factory=dict)
+    blocking_source_count: int = 0
+    protected_blocking_source_count: int = 0
+    unsafe_blocking_source_count: int = 0
+    undeclared_source_timeout_count: int = 0
     pending_submissions: int = 0
     max_pending_submissions: int | None = None
     payload_copy_components: Mapping[str, PayloadCopyHealth] = field(default_factory=dict)
@@ -376,6 +384,11 @@ class BuilderHealth:
     def __post_init__(self) -> None:
         object.__setattr__(self, "capacity", MappingProxyType(dict(self.capacity)))
         object.__setattr__(self, "circuits", MappingProxyType(dict(self.circuits)))
+        object.__setattr__(
+            self,
+            "source_timeout_guarantees",
+            MappingProxyType(dict(self.source_timeout_guarantees)),
+        )
         object.__setattr__(
             self,
             "payload_copy_components",
@@ -541,6 +554,21 @@ def _assess_builder_health(
             "closed",
             True,
             False,
+        )
+
+    if health.unsafe_blocking_source_count > 0:
+        unsafe_names = sorted(
+            name
+            for name, guarantee in health.source_timeout_guarantees.items()
+            if guarantee.blocking_io and not guarantee.protected
+        )
+        add(
+            BuilderHealthReason.UNSAFE_BLOCKING_SOURCE,
+            BuilderHealthSeverity.CRITICAL,
+            "unsafe_blocking_source_count",
+            health.unsafe_blocking_source_count,
+            0,
+            ",".join(unsafe_names),
         )
 
     capacity_waiting = max(0, int(health.waiting_for_capacity))

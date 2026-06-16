@@ -186,6 +186,10 @@ Transactional session revalidation accepts the same policy for its explicitly se
 
 ## Deadlines and timeouts
 
+Synchronous blocking sources have two distinct timers: the Coalestra wait budget and the transport timeout enforced by the external client. Cancelling the Coalestra wait cannot terminate a Python thread already inside a blocking call, so protected sources explicitly declare `blocking_io`, `blocking_io_offloaded`, and `transport_timeout_seconds`. The builder rejects unsafe declarations by default.
+
+Before dispatch, the source-call layer verifies that the declared transport timeout fits strictly inside the current source/deadline budget. Calls that cannot finish within the remaining budget are rejected before a worker starts. The declaration remains contractual because Coalestra cannot introspect whether a third-party client actually configured its socket, database, or SDK timeout correctly.
+
 A deadline is created once per build or session using a monotonic clock. The same absolute budget covers source-capacity waits, source execution, cache-boundary operations, bounded payload-copy capacity, payload-copy execution, derived dependency isolation, and asynchronous snapshot delivery. This prevents work after acquisition from silently extending the consumer's total wait.
 
 Worker threads that have already started cannot be terminated safely. When a copy reaches the snapshot deadline, the caller stops waiting and receives `SnapshotDeadlineExceededError`, while the worker keeps its copy-capacity slot until it really finishes. This preserves the configured concurrency bound during timeout or cancellation storms.
