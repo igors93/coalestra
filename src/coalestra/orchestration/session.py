@@ -123,7 +123,15 @@ class SnapshotSession:
                     strict=strict,
                     retry_errors=retry_errors,
                 )
-                raise SnapshotBuildError(deadline_errors) from error
+                if strict:
+                    raise SnapshotBuildError(deadline_errors) from error
+                self._resources = candidate_resources
+                self._errors = {**candidate_errors, **dict.fromkeys(pending, error)}
+                return await self._snapshot_state_async(
+                    self._resources,
+                    self._errors,
+                    enforce_deadline=False,
+                )
 
             self._resources = candidate_resources
             self._errors = candidate_errors
