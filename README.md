@@ -194,16 +194,6 @@ builder = SnapshotBuilder(
 
 `AsyncMemoryCache` and standalone `ResourcePublisher` instances accept the same `payload_copier` option. Returning the original object from a custom copier is safe only when the payload is deeply immutable.
 
-### Copy execution and snapshot deadlines
-
-The default deep-copy path runs through bounded worker threads at asynchronous ownership boundaries. The same absolute deadline created by `build(..., deadline_seconds=...)` or `builder.session(deadline_seconds=...)` covers waiting for copy capacity, executing the copy, cache-boundary isolation, and asynchronous snapshot delivery. A copy that cannot finish within the remaining budget fails with `SnapshotDeadlineExceededError`; when raised by `build` or `resolve`, it is reported through `SnapshotBuildError` like other resource failures.
-
-Python cannot safely terminate a worker thread that has already started. When a caller reaches its deadline, Coalestra stops waiting but keeps the copy-capacity slot reserved until that worker actually finishes. This prevents timed-out or cancelled copies from allowing more concurrent work than the configured limit.
-
-If acquisition has already failed because the deadline expired, Coalestra may still create a detached diagnostic snapshot outside the exhausted budget so `strict=False` and partial-error workflows retain their existing behavior. That best-effort copy cannot turn the failed operation into a success. Successful revalidation is stricter: candidate values are not committed until their detached delivery snapshot has also been copied within the remaining deadline.
-
-Custom payload copiers remain inline unless `run_payload_copies_in_thread=True` is set. Inline synchronous code cannot be interrupted while it is running, but Coalestra checks the deadline before and after the operation and reports an exhausted budget instead of accepting the late result.
-
 ## Source authority
 
 Source priority controls acquisition order. Source authority independently controls which revision
@@ -561,6 +551,24 @@ print(health.source_timeout_count)
 print(health.deadline_exceeded_count)
 print(health.revalidation_failure_count)
 ```
+
+Payload-copy health is exposed both as builder-wide aggregates and as bounded component snapshots. The `builder` component covers source, publisher, derived, custom-cache boundary, and asynchronous session-delivery copies. The `cache` component is present when the default `AsyncMemoryCache` exposes its independent copy limiter.
+
+```python
+health = await builder.health_snapshot()
+
+print(health.active_payload_copies)
+print(health.waiting_for_copy_capacity)
+print(health.payload_copy_timeout_count)
+
+builder_copies = health.payload_copy_components["builder"]
+print(builder_copies.max_concurrency)
+print(builder_copies.peak_active_copies)
+print(builder_copies.average_wait_ms)
+print(builder_copies.max_duration_ms)
+```
+
+`PayloadCopyHealth` separates current activity from cumulative outcomes. A timed-out caller may later be followed by a completed or failed worker because Python cannot safely terminate a thread that has already started; timeout and completion counters are therefore intentionally not mutually exclusive. Component names are fixed and low-cardinality.
 
 `sync_builder.health_snapshot()` adds `pending_submissions` and `max_pending_submissions` from the synchronous non-blocking publication backlog. Counters are process-local and cumulative since builder creation. The snapshot intentionally exposes aggregates only; it does not include symbols, subjects, qualifiers, or business decisions.
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from coalestra.core.health import PayloadCopyHealth
 from coalestra.core.isolation import (
     AsyncPayloadIsolator,
     PayloadCopier,
@@ -51,6 +52,7 @@ class AsyncMemoryCache:
 
     validates_dependency_versions = True
     validates_source_authority = True
+    exposes_payload_copy_health = True
 
     def __init__(
         self,
@@ -89,6 +91,11 @@ class AsyncMemoryCache:
         self._invalidations = 0
         self._evictions = 0
         self._expirations = 0
+
+    def copy_health_snapshot(self) -> PayloadCopyHealth:
+        """Return current and cumulative payload-copy health for this cache."""
+
+        return self._async_payload_isolator.health_snapshot()
 
     async def get(
         self,

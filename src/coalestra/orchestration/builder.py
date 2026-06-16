@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import uuid
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import replace
@@ -17,7 +18,11 @@ from coalestra.core.errors import (
     SourceFailure,
     SourceProtocolError,
 )
-from coalestra.core.health import BuilderHealth, OperationalHealthTracker
+from coalestra.core.health import (
+    BuilderHealth,
+    OperationalHealthTracker,
+    PayloadCopyHealth,
+)
 from coalestra.core.isolation import AsyncPayloadIsolator, PayloadCopier, PayloadIsolator
 from coalestra.core.models import (
     CacheWriteStatus,
@@ -275,6 +280,25 @@ class SnapshotBuilder:
         stats = getattr(self.cache, "stats", None)
         if callable(stats):
             cache_stats = await stats()
+
+        copy_components: dict[str, PayloadCopyHealth] = {
+            "builder": self._async_payload_isolator.health_snapshot(),
+        }
+        cache_isolator = getattr(self.cache, "_async_payload_isolator", None)
+        copy_health_snapshot = getattr(self.cache, "copy_health_snapshot", None)
+        exposes_copy_health = bool(getattr(self.cache, "exposes_payload_copy_health", False))
+        if (
+            exposes_copy_health
+            and callable(copy_health_snapshot)
+            and cache_isolator is not self._async_payload_isolator
+        ):
+            cache_copy_health = copy_health_snapshot()
+            if inspect.isawaitable(cache_copy_health):
+                cache_copy_health = await cache_copy_health
+            if not isinstance(cache_copy_health, PayloadCopyHealth):
+                raise TypeError("copy_health_snapshot must return PayloadCopyHealth")
+            copy_components["cache"] = cache_copy_health
+
         capacity = await self.capacity.snapshot()
         operational = self._health_tracker.snapshot()
         return BuilderHealth(
@@ -292,6 +316,28 @@ class SnapshotBuilder:
             deadline_exceeded_count=operational.deadline_exceeded_count,
             revalidation_attempt_count=operational.revalidation_attempt_count,
             revalidation_failure_count=operational.revalidation_failure_count,
+            payload_copy_components=copy_components,
+            active_payload_copies=sum(
+                snapshot.active_copies for snapshot in copy_components.values()
+            ),
+            waiting_for_copy_capacity=sum(
+                snapshot.waiting_for_capacity for snapshot in copy_components.values()
+            ),
+            payload_copy_started_count=sum(
+                snapshot.started_count for snapshot in copy_components.values()
+            ),
+            payload_copy_completed_count=sum(
+                snapshot.completed_count for snapshot in copy_components.values()
+            ),
+            payload_copy_failure_count=sum(
+                snapshot.failure_count for snapshot in copy_components.values()
+            ),
+            payload_copy_timeout_count=sum(
+                snapshot.timeout_count for snapshot in copy_components.values()
+            ),
+            payload_copy_capacity_timeout_count=sum(
+                snapshot.capacity_timeout_count for snapshot in copy_components.values()
+            ),
         )
 
     async def wait_for_refreshes(self) -> None:

@@ -50,6 +50,7 @@ from coalestra.core import (
     KeyNormalizer,
     ObservationPolicy,
     PayloadCopier,
+    PayloadCopyHealth,
     PayloadIsolationError,
     PayloadIsolator,
     RefreshMode,
@@ -113,7 +114,7 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.5.7"
+__version__ = "0.5.8"
 
 __all__ = [
     "CASE_INSENSITIVE_KEY_NORMALIZER",
@@ -171,6 +172,7 @@ __all__ = [
     "NullMetrics",
     "ObservationPolicy",
     "PayloadCopier",
+    "PayloadCopyHealth",
     "PayloadIsolationError",
     "PayloadIsolator",
     "PolicyResolver",

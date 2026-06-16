@@ -8,6 +8,130 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PayloadCopyHealth:
+    """Immutable operational state for one bounded payload-copy subsystem.
+
+    Current-state fields describe work observed when the snapshot was captured.
+    Counter and latency fields are cumulative since the subsystem was created.
+    A timed-out caller can later be followed by a completed or failed worker because
+    Python cannot safely stop a thread that has already started.
+    """
+
+    run_in_thread: bool
+    max_concurrency: int
+    active_copies: int = 0
+    waiting_for_capacity: int = 0
+    peak_active_copies: int = 0
+    peak_waiting_for_capacity: int = 0
+    started_count: int = 0
+    completed_count: int = 0
+    failure_count: int = 0
+    timeout_count: int = 0
+    capacity_timeout_count: int = 0
+    capacity_wait_count: int = 0
+    average_wait_ms: float = 0.0
+    max_wait_ms: float = 0.0
+    average_duration_ms: float = 0.0
+    max_duration_ms: float = 0.0
+
+
+class PayloadCopyHealthTracker:
+    """Track bounded payload-copy activity without performing I/O or awaiting."""
+
+    def __init__(self, *, run_in_thread: bool, max_concurrency: int) -> None:
+        self._run_in_thread = bool(run_in_thread)
+        self._max_concurrency = int(max_concurrency)
+        self._lock = threading.Lock()
+        self._active_copies = 0
+        self._waiting_for_capacity = 0
+        self._peak_active_copies = 0
+        self._peak_waiting_for_capacity = 0
+        self._started_count = 0
+        self._completed_count = 0
+        self._failure_count = 0
+        self._timeout_count = 0
+        self._capacity_timeout_count = 0
+        self._capacity_wait_count = 0
+        self._total_wait_ms = 0.0
+        self._max_wait_ms = 0.0
+        self._total_duration_ms = 0.0
+        self._max_duration_ms = 0.0
+
+    def capacity_wait_started(self) -> None:
+        with self._lock:
+            self._waiting_for_capacity += 1
+            self._peak_waiting_for_capacity = max(
+                self._peak_waiting_for_capacity,
+                self._waiting_for_capacity,
+            )
+
+    def capacity_wait_finished(self, elapsed_seconds: float) -> None:
+        elapsed_ms = max(0.0, float(elapsed_seconds) * 1000.0)
+        with self._lock:
+            if self._waiting_for_capacity <= 0:
+                raise RuntimeError("payload copy capacity waiter counter cannot become negative")
+            self._waiting_for_capacity -= 1
+            self._capacity_wait_count += 1
+            self._total_wait_ms += elapsed_ms
+            self._max_wait_ms = max(self._max_wait_ms, elapsed_ms)
+
+    def copy_started(self) -> None:
+        with self._lock:
+            self._active_copies += 1
+            self._started_count += 1
+            self._peak_active_copies = max(self._peak_active_copies, self._active_copies)
+
+    def copy_finished(self, elapsed_seconds: float, *, failed: bool) -> None:
+        elapsed_ms = max(0.0, float(elapsed_seconds) * 1000.0)
+        with self._lock:
+            if self._active_copies <= 0:
+                raise RuntimeError("active payload copy counter cannot become negative")
+            self._active_copies -= 1
+            if failed:
+                self._failure_count += 1
+            else:
+                self._completed_count += 1
+            self._total_duration_ms += elapsed_ms
+            self._max_duration_ms = max(self._max_duration_ms, elapsed_ms)
+
+    def record_timeout(self, *, waiting_for_capacity: bool = False) -> None:
+        with self._lock:
+            self._timeout_count += 1
+            if waiting_for_capacity:
+                self._capacity_timeout_count += 1
+
+    def snapshot(self) -> PayloadCopyHealth:
+        with self._lock:
+            finished_count = self._completed_count + self._failure_count
+            average_wait_ms = (
+                self._total_wait_ms / self._capacity_wait_count
+                if self._capacity_wait_count
+                else 0.0
+            )
+            average_duration_ms = (
+                self._total_duration_ms / finished_count if finished_count else 0.0
+            )
+            return PayloadCopyHealth(
+                run_in_thread=self._run_in_thread,
+                max_concurrency=self._max_concurrency,
+                active_copies=self._active_copies,
+                waiting_for_capacity=self._waiting_for_capacity,
+                peak_active_copies=self._peak_active_copies,
+                peak_waiting_for_capacity=self._peak_waiting_for_capacity,
+                started_count=self._started_count,
+                completed_count=self._completed_count,
+                failure_count=self._failure_count,
+                timeout_count=self._timeout_count,
+                capacity_timeout_count=self._capacity_timeout_count,
+                capacity_wait_count=self._capacity_wait_count,
+                average_wait_ms=average_wait_ms,
+                max_wait_ms=self._max_wait_ms,
+                average_duration_ms=average_duration_ms,
+                max_duration_ms=self._max_duration_ms,
+            )
+
+
+@dataclass(frozen=True)
 class BuilderHealth:
     """Immutable operational state for integration health endpoints.
 
@@ -31,10 +155,23 @@ class BuilderHealth:
     revalidation_failure_count: int = 0
     pending_submissions: int = 0
     max_pending_submissions: int | None = None
+    payload_copy_components: Mapping[str, PayloadCopyHealth] = field(default_factory=dict)
+    active_payload_copies: int = 0
+    waiting_for_copy_capacity: int = 0
+    payload_copy_started_count: int = 0
+    payload_copy_completed_count: int = 0
+    payload_copy_failure_count: int = 0
+    payload_copy_timeout_count: int = 0
+    payload_copy_capacity_timeout_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "capacity", MappingProxyType(dict(self.capacity)))
         object.__setattr__(self, "circuits", MappingProxyType(dict(self.circuits)))
+        object.__setattr__(
+            self,
+            "payload_copy_components",
+            MappingProxyType(dict(self.payload_copy_components)),
+        )
 
 
 @dataclass(frozen=True)

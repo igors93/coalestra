@@ -278,15 +278,20 @@ Observation skew is the difference between the newest and oldest `observed_at` a
 
 One builder owns a low-cardinality operational tracker shared by source dispatch, custom-cache fallbacks, the event publisher, and session revalidation. `health_snapshot()` reads this tracker, the capacity controller, single-flight state, refresh state, cache statistics, and circuit snapshots without performing source I/O.
 
-Current-state fields include active bounded-dispatch workers and the aggregate number of tasks waiting for capacity. Cumulative fields count queue timeouts, source-call timeouts, exhausted snapshot deadlines, revalidation attempts, and revalidation failures since builder creation. The synchronous facade overlays its current pending-submission count and configured backlog limit.
+Current-state fields include active bounded-dispatch workers, source-capacity waiters, active payload copies, and payload-copy capacity waiters. Cumulative fields count queue timeouts, source-call timeouts, exhausted snapshot deadlines, revalidation attempts, copy starts, copy completions, copy failures, and copy timeouts since builder creation. The synchronous facade overlays its current pending-submission count and configured backlog limit.
 
 ```text
 bounded dispatch workers ----+
 capacity limiters -----------+
-source timeout outcomes -----+--> BuilderHealth
+source timeout outcomes -----+
+payload copy runners --------+--> BuilderHealth
 session revalidation --------+
 sync submission backlog -----+
 ```
+
+`payload_copy_components` contains fixed low-cardinality snapshots. The `builder` component represents the shared isolator used outside the cache, while the `cache` component represents the default memory cache's independent limiter. Each `PayloadCopyHealth` reports current and peak activity, waiting, cumulative successes and failures, caller timeouts, capacity timeouts, and average/maximum wait and execution durations. Aggregate `BuilderHealth` counters are sums across the available components.
+
+A caller timeout does not imply that the underlying worker stopped. The health model therefore permits one operation to increment `timeout_count` and later increment either `completed_count` or `failure_count`. This distinction makes leaked capacity and slow late completions visible without weakening the concurrency limit.
 
 The health model remains operational rather than prescriptive. Coalestra reports saturation and failures; the consuming application decides whether to alert, degrade, pause work, or continue. No resource subjects or qualifier values are added to health fields.
 

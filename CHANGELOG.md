@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-- Included bounded payload-copy execution and copy-capacity waits in the absolute snapshot deadline.
-- Applied deadline accounting to source isolation, custom-cache boundaries, cache writes, derived dependencies, and asynchronous snapshot delivery.
-- Made successful revalidation commit only after its detached delivery snapshot is copied within the remaining deadline.
-- Preserved best-effort detached diagnostic snapshots when acquisition had already failed because the deadline was exhausted.
-- Added deterministic regressions for running copies, copy-capacity waits, cache isolation, delivery, cancellation-safe capacity, and transactional revalidation.
+## 0.5.8 - 2026-06-15
+
+- Added bounded asynchronous payload-copy execution across cache, source, publisher, derived, and session boundaries.
+- Included payload-copy capacity waits and execution time in the absolute snapshot deadline.
+- Added `PayloadCopyHealth` and exposed current copy activity, saturation, cumulative outcomes, timeouts, and latency summaries through `BuilderHealth`.
+- Added component-level copy health for the builder-wide isolator and the default memory cache without adding resource-level cardinality.
+- Added deterministic regressions for copy activity, waiting, failures, deadline timeouts, late worker completion, aggregation, and immutable health snapshots.
 
 ## 0.5.7 - 2026-06-15
 

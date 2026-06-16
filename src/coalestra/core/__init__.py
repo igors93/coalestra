@@ -31,7 +31,7 @@ from coalestra.core.errors import (
     SourceUnavailableError,
     SubmissionBacklogFullError,
 )
-from coalestra.core.health import BuilderHealth
+from coalestra.core.health import BuilderHealth, PayloadCopyHealth
 from coalestra.core.isolation import PayloadCopier, PayloadIsolator, deepcopy_payload
 from coalestra.core.keys import (
     CASE_INSENSITIVE_KEY_NORMALIZER,
@@ -110,6 +110,7 @@ __all__ = [
     "MetricsSink",
     "ObservationPolicy",
     "PayloadCopier",
+    "PayloadCopyHealth",
     "PayloadIsolationError",
     "PayloadIsolator",
     "RefreshMode",

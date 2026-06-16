@@ -5,10 +5,12 @@ from collections.abc import Callable, Collection, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from functools import partial
+from time import monotonic as health_monotonic
 from typing import Any, TypeVar, cast
 
 from coalestra.core.deadline import remaining_deadline_seconds
 from coalestra.core.errors import PayloadIsolationError, SnapshotDeadlineExceededError
+from coalestra.core.health import PayloadCopyHealth, PayloadCopyHealthTracker
 from coalestra.core.models import SnapshotValue
 
 T = TypeVar("T")
@@ -122,6 +124,15 @@ class AsyncPayloadIsolator:
         )
         self.max_concurrency = max_concurrency
         self._limiter = asyncio.Semaphore(max_concurrency)
+        self._health_tracker = PayloadCopyHealthTracker(
+            run_in_thread=self.run_in_thread,
+            max_concurrency=max_concurrency,
+        )
+
+    def health_snapshot(self) -> PayloadCopyHealth:
+        """Return a lock-safe snapshot of copy activity and cumulative outcomes."""
+
+        return self._health_tracker.snapshot()
 
     async def run(
         self,
@@ -134,19 +145,41 @@ class AsyncPayloadIsolator:
         """Run one copy operation with bounded, deadline-aware capacity accounting."""
 
         monotonic_clock = monotonic or asyncio.get_running_loop().time
-        remaining_deadline_seconds(
-            deadline_monotonic,
-            monotonic=monotonic_clock,
-            operation=deadline_context,
-        )
-
-        if not self.run_in_thread:
-            result = operation()
+        try:
             remaining_deadline_seconds(
                 deadline_monotonic,
                 monotonic=monotonic_clock,
                 operation=deadline_context,
             )
+        except SnapshotDeadlineExceededError:
+            self._health_tracker.record_timeout()
+            raise
+
+        if not self.run_in_thread:
+            started_at = health_monotonic()
+            self._health_tracker.copy_started()
+            try:
+                result = operation()
+            except BaseException:
+                self._health_tracker.copy_finished(
+                    health_monotonic() - started_at,
+                    failed=True,
+                )
+                raise
+            else:
+                self._health_tracker.copy_finished(
+                    health_monotonic() - started_at,
+                    failed=False,
+                )
+            try:
+                remaining_deadline_seconds(
+                    deadline_monotonic,
+                    monotonic=monotonic_clock,
+                    operation=deadline_context,
+                )
+            except SnapshotDeadlineExceededError:
+                self._health_tracker.record_timeout()
+                raise
             return result
 
         await self._acquire_slot(
@@ -154,9 +187,15 @@ class AsyncPayloadIsolator:
             monotonic=monotonic_clock,
             deadline_context=deadline_context,
         )
+        started_at = health_monotonic()
+        self._health_tracker.copy_started()
         try:
             worker = asyncio.create_task(asyncio.to_thread(operation))
         except BaseException:
+            self._health_tracker.copy_finished(
+                health_monotonic() - started_at,
+                failed=True,
+            )
             self._limiter.release()
             raise
 
@@ -167,35 +206,46 @@ class AsyncPayloadIsolator:
             if released:
                 return
             released = True
-            if not task.cancelled():
-                task.exception()
+            failed = task.cancelled()
+            if not failed:
+                failed = task.exception() is not None
+            self._health_tracker.copy_finished(
+                health_monotonic() - started_at,
+                failed=failed,
+            )
             self._limiter.release()
 
         # Python cannot stop a worker thread after it starts. Keep its capacity slot
         # reserved until the underlying operation actually finishes.
         worker.add_done_callback(release_slot)
-        timeout_seconds = remaining_deadline_seconds(
-            deadline_monotonic,
-            monotonic=monotonic_clock,
-            operation=deadline_context,
-        )
         try:
-            completed, _pending = await asyncio.wait((worker,), timeout=timeout_seconds)
-        except BaseException:
+            timeout_seconds = remaining_deadline_seconds(
+                deadline_monotonic,
+                monotonic=monotonic_clock,
+                operation=deadline_context,
+            )
+        except SnapshotDeadlineExceededError:
+            self._health_tracker.record_timeout()
             raise
 
+        completed, _pending = await asyncio.wait((worker,), timeout=timeout_seconds)
         if worker not in completed:
+            self._health_tracker.record_timeout()
             raise SnapshotDeadlineExceededError(
                 f"snapshot deadline exceeded while {deadline_context}"
             )
 
         try:
             result = await worker
-            remaining_deadline_seconds(
-                deadline_monotonic,
-                monotonic=monotonic_clock,
-                operation=deadline_context,
-            )
+            try:
+                remaining_deadline_seconds(
+                    deadline_monotonic,
+                    monotonic=monotonic_clock,
+                    operation=deadline_context,
+                )
+            except SnapshotDeadlineExceededError:
+                self._health_tracker.record_timeout()
+                raise
             return result
         finally:
             release_slot(worker)
@@ -330,42 +380,55 @@ class AsyncPayloadIsolator:
         monotonic: Callable[[], float],
         deadline_context: str,
     ) -> None:
-        timeout_seconds = remaining_deadline_seconds(
-            deadline_monotonic,
-            monotonic=monotonic,
-            operation=f"waiting for copy capacity while {deadline_context}",
-        )
-        if timeout_seconds is None:
-            await self._limiter.acquire()
-            return
-
-        acquire_task = asyncio.create_task(self._limiter.acquire())
+        wait_started_at = health_monotonic()
+        self._health_tracker.capacity_wait_started()
         try:
-            completed, _pending = await asyncio.wait(
-                (acquire_task,),
-                timeout=timeout_seconds,
-            )
-        except BaseException:
+            try:
+                timeout_seconds = remaining_deadline_seconds(
+                    deadline_monotonic,
+                    monotonic=monotonic,
+                    operation=f"waiting for copy capacity while {deadline_context}",
+                )
+            except SnapshotDeadlineExceededError:
+                self._health_tracker.record_timeout(waiting_for_capacity=True)
+                raise
+
+            if timeout_seconds is None:
+                await self._limiter.acquire()
+                return
+
+            acquire_task = asyncio.create_task(self._limiter.acquire())
+            try:
+                completed, _pending = await asyncio.wait(
+                    (acquire_task,),
+                    timeout=timeout_seconds,
+                )
+            except BaseException:
+                if acquire_task.done() and not acquire_task.cancelled():
+                    error = acquire_task.exception()
+                    if error is None and acquire_task.result():
+                        self._limiter.release()
+                else:
+                    acquire_task.cancel()
+                    await asyncio.gather(acquire_task, return_exceptions=True)
+                raise
+
+            if acquire_task in completed:
+                await acquire_task
+                return
+
+            acquire_task.cancel()
+            await asyncio.gather(acquire_task, return_exceptions=True)
             if acquire_task.done() and not acquire_task.cancelled():
                 error = acquire_task.exception()
                 if error is None and acquire_task.result():
                     self._limiter.release()
-            else:
-                acquire_task.cancel()
-                await asyncio.gather(acquire_task, return_exceptions=True)
-            raise
-
-        if acquire_task in completed:
-            await acquire_task
-            return
-
-        acquire_task.cancel()
-        await asyncio.gather(acquire_task, return_exceptions=True)
-        if acquire_task.done() and not acquire_task.cancelled():
-            error = acquire_task.exception()
-            if error is None and acquire_task.result():
-                self._limiter.release()
-        raise SnapshotDeadlineExceededError(
-            "snapshot deadline exceeded while waiting for payload copy capacity "
-            f"during {deadline_context}"
-        )
+            self._health_tracker.record_timeout(waiting_for_capacity=True)
+            raise SnapshotDeadlineExceededError(
+                "snapshot deadline exceeded while waiting for payload copy capacity "
+                f"during {deadline_context}"
+            )
+        finally:
+            self._health_tracker.capacity_wait_finished(
+                health_monotonic() - wait_started_at,
+            )

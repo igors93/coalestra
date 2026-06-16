@@ -53,6 +53,7 @@ NullMetrics
 ObservationPolicy
 PRESERVE_KEY_NORMALIZER
 PayloadCopier
+PayloadCopyHealth
 PayloadIsolationError
 PayloadIsolator
 PolicyResolver
