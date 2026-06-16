@@ -53,6 +53,8 @@ class AsyncMemoryCache:
     validates_dependency_versions = True
     validates_source_authority = True
     exposes_payload_copy_health = True
+    exposes_payload_copy_lifecycle = True
+    payload_copy_lifecycle_is_complete_close = True
 
     def __init__(
         self,
@@ -78,6 +80,7 @@ class AsyncMemoryCache:
             self._payload_isolator,
             run_in_thread=run_payload_copies_in_thread,
             max_concurrency=max_copy_concurrency,
+            component_name="cache",
         )
         self.run_payload_copies_in_thread = self._async_payload_isolator.run_in_thread
         self.max_copy_concurrency = self._async_payload_isolator.max_concurrency
@@ -96,6 +99,16 @@ class AsyncMemoryCache:
         """Return current and cumulative payload-copy health for this cache."""
 
         return self._async_payload_isolator.health_snapshot()
+
+    async def aclose_payload_copies(self, *, timeout_seconds: float | None = 5.0) -> None:
+        """Stop accepting cache copies and wait for active copy workers to drain."""
+
+        await self._async_payload_isolator.aclose(timeout_seconds=timeout_seconds)
+
+    async def aclose(self) -> None:
+        """Close the cache-owned payload-copy subsystem."""
+
+        await self.aclose_payload_copies()
 
     async def get(
         self,

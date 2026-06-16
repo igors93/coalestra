@@ -9,7 +9,10 @@ from typing import Any, TypeVar
 
 from coalestra.cache.publisher import PublishResult, ResourcePublisher, ResourceUpdate
 from coalestra.core.consistency import SnapshotConsistencyPolicy
-from coalestra.core.errors import SubmissionBacklogFullError
+from coalestra.core.errors import (
+    PayloadCopyShutdownTimeoutError,
+    SubmissionBacklogFullError,
+)
 from coalestra.core.health import BuilderHealth
 from coalestra.core.models import ResourceKey, Snapshot
 from coalestra.core.request import SnapshotRequest
@@ -435,22 +438,37 @@ class SyncSnapshotBuilder:
 
             self._drain_or_cancel_submissions(pending)
             close_error: BaseException | None = None
+            deferred_loop_stop = False
             try:
                 if self._close_builder:
-                    self._submit_during_close(self.builder.aclose())
+                    self._submit_during_close(
+                        self.builder.aclose(
+                            copy_shutdown_timeout_seconds=self._shutdown_timeout_seconds,
+                        )
+                    )
                 else:
                     self._submit_during_close(self.builder.wait_for_refreshes())
             except BaseException as error:
                 close_error = error
+                if self._close_builder and isinstance(
+                    error,
+                    PayloadCopyShutdownTimeoutError,
+                ):
+                    asyncio.run_coroutine_threadsafe(
+                        self._stop_loop_after_payload_copies(),
+                        self._loop,
+                    )
+                    deferred_loop_stop = True
             finally:
                 with self._submission_condition:
                     self._closed = True
                     self._closing = False
                     self._submission_condition.notify_all()
-                self._loop.call_soon_threadsafe(self._loop.stop)
-                self._thread.join(timeout=self._shutdown_timeout_seconds)
+                if not deferred_loop_stop:
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                    self._thread.join(timeout=self._shutdown_timeout_seconds)
 
-            if self._thread.is_alive():
+            if not deferred_loop_stop and self._thread.is_alive():
                 raise RuntimeError("Coalestra synchronous event-loop thread did not stop")
             if close_error is not None:
                 raise close_error
@@ -529,10 +547,18 @@ class SyncSnapshotBuilder:
     def _submit_during_close(self, coroutine: Coroutine[Any, Any, T]) -> T:
         future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
         try:
-            return future.result(timeout=self._shutdown_timeout_seconds)
+            return future.result(timeout=self._shutdown_timeout_seconds + 0.1)
         except BaseException:
             future.cancel()
             raise
+
+    async def _stop_loop_after_payload_copies(self) -> None:
+        try:
+            await self.builder.wait_for_payload_copy_shutdown()
+        except BaseException:
+            pass
+        finally:
+            self._loop.call_soon(self._loop.stop)
 
     async def _create_session(
         self,

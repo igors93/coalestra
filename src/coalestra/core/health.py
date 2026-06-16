@@ -33,6 +33,12 @@ class PayloadCopyHealth:
     max_wait_ms: float = 0.0
     average_duration_ms: float = 0.0
     max_duration_ms: float = 0.0
+    accepting_copies: bool = True
+    shutdown_started: bool = False
+    shutdown_complete: bool = False
+    shutdown_incomplete: bool = False
+    shutdown_timeout_count: int = 0
+    active_at_last_shutdown_timeout: int = 0
 
 
 class PayloadCopyHealthTracker:
@@ -56,6 +62,12 @@ class PayloadCopyHealthTracker:
         self._max_wait_ms = 0.0
         self._total_duration_ms = 0.0
         self._max_duration_ms = 0.0
+        self._accepting_copies = True
+        self._shutdown_started = False
+        self._shutdown_complete = False
+        self._shutdown_incomplete = False
+        self._shutdown_timeout_count = 0
+        self._active_at_last_shutdown_timeout = 0
 
     def capacity_wait_started(self) -> None:
         with self._lock:
@@ -100,6 +112,25 @@ class PayloadCopyHealthTracker:
             if waiting_for_capacity:
                 self._capacity_timeout_count += 1
 
+    def shutdown_started(self) -> None:
+        with self._lock:
+            self._accepting_copies = False
+            self._shutdown_started = True
+            self._shutdown_complete = False
+
+    def shutdown_timed_out(self, *, active_copies: int) -> None:
+        with self._lock:
+            self._shutdown_incomplete = True
+            self._shutdown_timeout_count += 1
+            self._active_at_last_shutdown_timeout = max(0, int(active_copies))
+
+    def shutdown_completed(self) -> None:
+        with self._lock:
+            self._accepting_copies = False
+            self._shutdown_started = True
+            self._shutdown_complete = True
+            self._shutdown_incomplete = False
+
     def snapshot(self) -> PayloadCopyHealth:
         with self._lock:
             finished_count = self._completed_count + self._failure_count
@@ -128,6 +159,12 @@ class PayloadCopyHealthTracker:
                 max_wait_ms=self._max_wait_ms,
                 average_duration_ms=average_duration_ms,
                 max_duration_ms=self._max_duration_ms,
+                accepting_copies=self._accepting_copies,
+                shutdown_started=self._shutdown_started,
+                shutdown_complete=self._shutdown_complete,
+                shutdown_incomplete=self._shutdown_incomplete,
+                shutdown_timeout_count=self._shutdown_timeout_count,
+                active_at_last_shutdown_timeout=self._active_at_last_shutdown_timeout,
             )
 
 
@@ -163,6 +200,9 @@ class BuilderHealth:
     payload_copy_failure_count: int = 0
     payload_copy_timeout_count: int = 0
     payload_copy_capacity_timeout_count: int = 0
+    payload_copy_shutdown_incomplete: bool = False
+    payload_copy_shutdown_timeout_count: int = 0
+    payload_copy_active_at_last_shutdown_timeout: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "capacity", MappingProxyType(dict(self.capacity)))

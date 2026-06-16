@@ -5,11 +5,16 @@ from collections.abc import Callable, Collection, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from functools import partial
-from time import monotonic as health_monotonic
+from time import perf_counter_ns
 from typing import Any, TypeVar, cast
 
 from coalestra.core.deadline import remaining_deadline_seconds
-from coalestra.core.errors import PayloadIsolationError, SnapshotDeadlineExceededError
+from coalestra.core.errors import (
+    PayloadCopyShutdownTimeoutError,
+    PayloadCopySubsystemClosedError,
+    PayloadIsolationError,
+    SnapshotDeadlineExceededError,
+)
 from coalestra.core.health import PayloadCopyHealth, PayloadCopyHealthTracker
 from coalestra.core.models import SnapshotValue
 
@@ -17,6 +22,13 @@ T = TypeVar("T")
 _CopyItem = TypeVar("_CopyItem")
 _CopyResult = TypeVar("_CopyResult")
 PayloadCopier = Callable[[Any], Any]
+
+
+def _health_elapsed_seconds(started_ns: int) -> float:
+    """Return a positive elapsed duration using the highest-resolution local timer."""
+
+    elapsed_ns = max(1, perf_counter_ns() - started_ns)
+    return elapsed_ns / 1_000_000_000.0
 
 
 def deepcopy_payload(value: T) -> T:
@@ -102,7 +114,7 @@ class PayloadIsolator:
 
 
 class AsyncPayloadIsolator:
-    """Run payload isolation without monopolizing the event loop when configured."""
+    """Run payload isolation with bounded concurrency and controlled shutdown."""
 
     def __init__(
         self,
@@ -110,6 +122,7 @@ class AsyncPayloadIsolator:
         *,
         run_in_thread: bool | None = None,
         max_concurrency: int = 4,
+        component_name: str = "payload-copy",
     ) -> None:
         if run_in_thread is not None and not isinstance(run_in_thread, bool):
             raise TypeError("run_in_thread must be a boolean or None")
@@ -117,22 +130,80 @@ class AsyncPayloadIsolator:
             raise TypeError("max_concurrency must be an integer")
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1")
+        normalized_component = str(component_name).strip()
+        if not normalized_component:
+            raise ValueError("component_name cannot be empty")
 
         self.isolator = isolator
         self.run_in_thread = (
             isolator.uses_default_copier if run_in_thread is None else run_in_thread
         )
         self.max_concurrency = max_concurrency
+        self.component_name = normalized_component
         self._limiter = asyncio.Semaphore(max_concurrency)
         self._health_tracker = PayloadCopyHealthTracker(
             run_in_thread=self.run_in_thread,
             max_concurrency=max_concurrency,
         )
+        self._closing = False
+        self._closed = False
+        self._workers: set[asyncio.Task[Any]] = set()
+        self._capacity_waiters: set[asyncio.Task[bool]] = set()
+
+    @property
+    def closing(self) -> bool:
+        """Whether shutdown has started and new copies are rejected."""
+
+        return self._closing and not self._closed
+
+    @property
+    def closed(self) -> bool:
+        """Whether shutdown completed after every tracked worker drained."""
+
+        return self._closed
 
     def health_snapshot(self) -> PayloadCopyHealth:
         """Return a lock-safe snapshot of copy activity and cumulative outcomes."""
 
         return self._health_tracker.snapshot()
+
+    async def aclose(self, *, timeout_seconds: float | None = 5.0) -> None:
+        """Reject new work and wait for already-started worker copies to finish."""
+
+        if timeout_seconds is not None:
+            if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+                raise TypeError("timeout_seconds must be a number or None")
+            if timeout_seconds <= 0:
+                raise ValueError("timeout_seconds must be positive or None")
+            resolved_timeout = float(timeout_seconds)
+        else:
+            resolved_timeout = None
+
+        if self._closed:
+            return
+        if not self._closing:
+            self._closing = True
+            self._health_tracker.shutdown_started()
+            for waiter in tuple(self._capacity_waiters):
+                waiter.cancel()
+            self._mark_closed_if_drained()
+        if self._closed:
+            return
+
+        workers = tuple(self._workers)
+        if resolved_timeout is None:
+            await asyncio.gather(*workers, return_exceptions=True)
+        else:
+            _completed, pending = await asyncio.wait(workers, timeout=resolved_timeout)
+            if pending:
+                active_copies = len(pending)
+                self._health_tracker.shutdown_timed_out(active_copies=active_copies)
+                raise PayloadCopyShutdownTimeoutError(
+                    timeout_seconds=resolved_timeout,
+                    active_components={self.component_name: active_copies},
+                )
+        await asyncio.sleep(0)
+        self._mark_closed_if_drained()
 
     async def run(
         self,
@@ -144,6 +215,7 @@ class AsyncPayloadIsolator:
     ) -> _CopyResult:
         """Run one copy operation with bounded, deadline-aware capacity accounting."""
 
+        self._ensure_accepting()
         monotonic_clock = monotonic or asyncio.get_running_loop().time
         try:
             remaining_deadline_seconds(
@@ -156,19 +228,19 @@ class AsyncPayloadIsolator:
             raise
 
         if not self.run_in_thread:
-            started_at = health_monotonic()
+            started_at = perf_counter_ns()
             self._health_tracker.copy_started()
             try:
                 result = operation()
             except BaseException:
                 self._health_tracker.copy_finished(
-                    health_monotonic() - started_at,
+                    _health_elapsed_seconds(started_at),
                     failed=True,
                 )
                 raise
             else:
                 self._health_tracker.copy_finished(
-                    health_monotonic() - started_at,
+                    _health_elapsed_seconds(started_at),
                     failed=False,
                 )
             try:
@@ -187,18 +259,20 @@ class AsyncPayloadIsolator:
             monotonic=monotonic_clock,
             deadline_context=deadline_context,
         )
-        started_at = health_monotonic()
+        started_at = perf_counter_ns()
         self._health_tracker.copy_started()
         try:
             worker = asyncio.create_task(asyncio.to_thread(operation))
         except BaseException:
             self._health_tracker.copy_finished(
-                health_monotonic() - started_at,
+                _health_elapsed_seconds(started_at),
                 failed=True,
             )
             self._limiter.release()
+            self._mark_closed_if_drained()
             raise
 
+        self._workers.add(worker)
         released = False
 
         def release_slot(task: asyncio.Task[_CopyResult]) -> None:
@@ -210,10 +284,12 @@ class AsyncPayloadIsolator:
             if not failed:
                 failed = task.exception() is not None
             self._health_tracker.copy_finished(
-                health_monotonic() - started_at,
+                _health_elapsed_seconds(started_at),
                 failed=failed,
             )
+            self._workers.discard(task)
             self._limiter.release()
+            self._mark_closed_if_drained()
 
         # Python cannot stop a worker thread after it starts. Keep its capacity slot
         # reserved until the underlying operation actually finishes.
@@ -261,6 +337,7 @@ class AsyncPayloadIsolator:
     ) -> tuple[_CopyResult, ...]:
         """Copy an ordered collection through a fixed, deadline-aware worker set."""
 
+        self._ensure_accepting()
         ordered = tuple(items)
         if not ordered:
             return ()
@@ -380,8 +457,10 @@ class AsyncPayloadIsolator:
         monotonic: Callable[[], float],
         deadline_context: str,
     ) -> None:
-        wait_started_at = health_monotonic()
+        self._ensure_accepting()
+        wait_started_at = perf_counter_ns()
         self._health_tracker.capacity_wait_started()
+        acquire_task: asyncio.Task[bool] | None = None
         try:
             try:
                 timeout_seconds = remaining_deadline_seconds(
@@ -393,42 +472,61 @@ class AsyncPayloadIsolator:
                 self._health_tracker.record_timeout(waiting_for_capacity=True)
                 raise
 
-            if timeout_seconds is None:
-                await self._limiter.acquire()
-                return
-
             acquire_task = asyncio.create_task(self._limiter.acquire())
+            self._capacity_waiters.add(acquire_task)
             try:
                 completed, _pending = await asyncio.wait(
                     (acquire_task,),
                     timeout=timeout_seconds,
                 )
             except BaseException:
-                if acquire_task.done() and not acquire_task.cancelled():
-                    error = acquire_task.exception()
-                    if error is None and acquire_task.result():
-                        self._limiter.release()
-                else:
-                    acquire_task.cancel()
-                    await asyncio.gather(acquire_task, return_exceptions=True)
+                await self._cancel_or_release_acquire(acquire_task)
                 raise
 
             if acquire_task in completed:
-                await acquire_task
+                try:
+                    await acquire_task
+                except asyncio.CancelledError as error:
+                    if self._closing:
+                        raise PayloadCopySubsystemClosedError(
+                            component=self.component_name
+                        ) from error
+                    raise
+                if self._closing:
+                    self._limiter.release()
+                    raise PayloadCopySubsystemClosedError(component=self.component_name)
                 return
 
-            acquire_task.cancel()
-            await asyncio.gather(acquire_task, return_exceptions=True)
-            if acquire_task.done() and not acquire_task.cancelled():
-                error = acquire_task.exception()
-                if error is None and acquire_task.result():
-                    self._limiter.release()
+            await self._cancel_or_release_acquire(acquire_task)
             self._health_tracker.record_timeout(waiting_for_capacity=True)
             raise SnapshotDeadlineExceededError(
                 "snapshot deadline exceeded while waiting for payload copy capacity "
                 f"during {deadline_context}"
             )
         finally:
+            if acquire_task is not None:
+                self._capacity_waiters.discard(acquire_task)
             self._health_tracker.capacity_wait_finished(
-                health_monotonic() - wait_started_at,
+                _health_elapsed_seconds(wait_started_at),
             )
+
+    async def _cancel_or_release_acquire(self, task: asyncio.Task[bool]) -> None:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None and task.result():
+            self._limiter.release()
+
+    def _ensure_accepting(self) -> None:
+        if self._closing or self._closed:
+            raise PayloadCopySubsystemClosedError(component=self.component_name)
+
+    def _mark_closed_if_drained(self) -> None:
+        if not self._closing or self._workers or self._closed:
+            return
+        self._closed = True
+        self._health_tracker.shutdown_completed()

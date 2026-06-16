@@ -124,10 +124,12 @@ class ResourcePublisher:
         self.events = events
         self.observation_policy = observation_policy or ObservationPolicy()
         self._payload_isolator = payload_isolator or PayloadIsolator(payload_copier)
+        self._owns_async_payload_isolator = _async_payload_isolator is None
         self._async_payload_isolator = _async_payload_isolator or AsyncPayloadIsolator(
             self._payload_isolator,
             run_in_thread=run_payload_copies_in_thread,
             max_concurrency=max_copy_concurrency,
+            component_name="publisher",
         )
         self.run_payload_copies_in_thread = self._async_payload_isolator.run_in_thread
         self.max_copy_concurrency = self._async_payload_isolator.max_concurrency
@@ -145,6 +147,12 @@ class ResourcePublisher:
             ttl_seconds=float("inf"),
             max_stale_seconds=float("inf"),
         )
+
+    async def aclose(self, *, timeout_seconds: float | None = 5.0) -> None:
+        """Close a publisher-owned copy subsystem without closing a shared builder runner."""
+
+        if self._owns_async_payload_isolator:
+            await self._async_payload_isolator.aclose(timeout_seconds=timeout_seconds)
 
     def _prepare_update_for_submission(
         self,

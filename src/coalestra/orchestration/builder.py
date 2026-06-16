@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import uuid
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Awaitable, Collection, Iterable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -13,6 +14,7 @@ from coalestra.core.authority import AuthorityPolicyResolver, SourceAuthorityPol
 from coalestra.core.clock import SystemClock
 from coalestra.core.diagnostics import DiagnosticsCollector
 from coalestra.core.errors import (
+    PayloadCopyShutdownTimeoutError,
     ResourceResolutionError,
     SnapshotBuildError,
     SourceFailure,
@@ -103,6 +105,7 @@ class SnapshotBuilder:
         max_copy_concurrency: int = 4,
         cache_run_payload_copies_in_thread: bool | None = None,
         cache_max_copy_concurrency: int = 4,
+        copy_shutdown_timeout_seconds: float = 5.0,
     ) -> None:
         if authority_policy is not None and authority_resolver is not None:
             raise ValueError("authority_policy and authority_resolver cannot be provided together")
@@ -134,6 +137,12 @@ class SnapshotBuilder:
             raise TypeError("cache_max_copy_concurrency must be an integer")
         if cache_max_copy_concurrency < 1:
             raise ValueError("cache_max_copy_concurrency must be at least 1")
+        if isinstance(copy_shutdown_timeout_seconds, bool) or not isinstance(
+            copy_shutdown_timeout_seconds, (int, float)
+        ):
+            raise TypeError("copy_shutdown_timeout_seconds must be a number")
+        if copy_shutdown_timeout_seconds <= 0:
+            raise ValueError("copy_shutdown_timeout_seconds must be positive")
         if cache is not None and (
             cache_run_payload_copies_in_thread is not None or cache_max_copy_concurrency != 4
         ):
@@ -153,9 +162,12 @@ class SnapshotBuilder:
             self._payload_isolator,
             run_in_thread=run_payload_copies_in_thread,
             max_concurrency=max_copy_concurrency,
+            component_name="builder",
         )
         self.run_payload_copies_in_thread = self._async_payload_isolator.run_in_thread
         self.max_copy_concurrency = self._async_payload_isolator.max_concurrency
+        self.copy_shutdown_timeout_seconds = float(copy_shutdown_timeout_seconds)
+        self._owns_cache = cache is None
         self.cache = cache or AsyncMemoryCache(
             payload_copier=payload_copier,
             run_payload_copies_in_thread=cache_run_payload_copies_in_thread,
@@ -240,6 +252,7 @@ class SnapshotBuilder:
             events=self.events,
         )
         self._background_refreshes = self._refresh_manager.tasks
+        self._closing = False
         self._closed = False
         self.publisher = ResourcePublisher(
             cache=self.cache,
@@ -338,6 +351,15 @@ class SnapshotBuilder:
             payload_copy_capacity_timeout_count=sum(
                 snapshot.capacity_timeout_count for snapshot in copy_components.values()
             ),
+            payload_copy_shutdown_incomplete=any(
+                snapshot.shutdown_incomplete for snapshot in copy_components.values()
+            ),
+            payload_copy_shutdown_timeout_count=sum(
+                snapshot.shutdown_timeout_count for snapshot in copy_components.values()
+            ),
+            payload_copy_active_at_last_shutdown_timeout=sum(
+                snapshot.active_at_last_shutdown_timeout for snapshot in copy_components.values()
+            ),
         )
 
     async def wait_for_refreshes(self) -> None:
@@ -345,15 +367,118 @@ class SnapshotBuilder:
 
         await self._refresh_manager.wait()
 
-    async def aclose(self, *, cancel_refreshes: bool = False) -> None:
-        """Close the builder, settle refreshes, and optionally close owned components."""
+    async def aclose(
+        self,
+        *,
+        cancel_refreshes: bool = False,
+        copy_shutdown_timeout_seconds: float | None = None,
+    ) -> None:
+        """Close the builder and drain tracked payload-copy workers within one budget."""
+
+        if copy_shutdown_timeout_seconds is not None:
+            if isinstance(copy_shutdown_timeout_seconds, bool) or not isinstance(
+                copy_shutdown_timeout_seconds, (int, float)
+            ):
+                raise TypeError("copy_shutdown_timeout_seconds must be a number or None")
+            if copy_shutdown_timeout_seconds <= 0:
+                raise ValueError("copy_shutdown_timeout_seconds must be positive or None")
+            resolved_copy_timeout = float(copy_shutdown_timeout_seconds)
+        else:
+            resolved_copy_timeout = self.copy_shutdown_timeout_seconds
 
         if self._closed:
             return
+        self._closing = True
         self._closed = True
-        await self._refresh_manager.close(cancel=cancel_refreshes)
-        if self.manage_lifecycle:
-            await close_components((*self.sources, self.cache, self.events, self.metrics))
+
+        refresh_error: BaseException | None = None
+        copy_error: BaseException | None = None
+        lifecycle_error: BaseException | None = None
+        try:
+            try:
+                await self._refresh_manager.close(cancel=cancel_refreshes)
+            except BaseException as error:
+                refresh_error = error
+
+            try:
+                await self._close_payload_copy_components(
+                    timeout_seconds=resolved_copy_timeout,
+                )
+            except BaseException as error:
+                copy_error = error
+
+            if self.manage_lifecycle:
+                components: tuple[object, ...]
+                cache_lifecycle_handled = bool(
+                    getattr(
+                        self.cache,
+                        "payload_copy_lifecycle_is_complete_close",
+                        False,
+                    )
+                ) and (self._owns_cache or self.manage_lifecycle)
+                if cache_lifecycle_handled:
+                    components = (*self.sources, self.events, self.metrics)
+                else:
+                    components = (*self.sources, self.cache, self.events, self.metrics)
+                try:
+                    await close_components(components)
+                except BaseException as error:
+                    lifecycle_error = error
+        finally:
+            self._closing = False
+
+        if copy_error is not None:
+            raise copy_error
+        if refresh_error is not None:
+            raise refresh_error
+        if lifecycle_error is not None:
+            raise lifecycle_error
+
+    async def wait_for_payload_copy_shutdown(self) -> None:
+        """Wait without a deadline for copy workers after a timed-out close attempt."""
+
+        await self._close_payload_copy_components(timeout_seconds=None)
+
+    async def _close_payload_copy_components(
+        self,
+        *,
+        timeout_seconds: float | None,
+    ) -> None:
+        closers: list[tuple[str, Awaitable[None]]] = [
+            (
+                "builder",
+                self._async_payload_isolator.aclose(timeout_seconds=timeout_seconds),
+            )
+        ]
+        manages_cache_copy_lifecycle = self._owns_cache or (
+            self.manage_lifecycle
+            and bool(getattr(self.cache, "exposes_payload_copy_lifecycle", False))
+        )
+        if manages_cache_copy_lifecycle:
+            cache_close = getattr(self.cache, "aclose_payload_copies", None)
+            if callable(cache_close):
+                closers.append(("cache", cache_close(timeout_seconds=timeout_seconds)))
+
+        results = await asyncio.gather(
+            *(closer for _name, closer in closers),
+            return_exceptions=True,
+        )
+        active_components: dict[str, int] = {}
+        unexpected: BaseException | None = None
+        for (name, _closer), result in zip(closers, results, strict=True):
+            if isinstance(result, PayloadCopyShutdownTimeoutError):
+                active_components[name] = result.active_copies
+            elif isinstance(result, BaseException) and unexpected is None:
+                unexpected = result
+
+        if active_components:
+            assert timeout_seconds is not None
+            raise PayloadCopyShutdownTimeoutError(
+                timeout_seconds=timeout_seconds,
+                active_components=active_components,
+            )
+        if unexpected is not None:
+            raise unexpected
 
     async def __aenter__(self) -> SnapshotBuilder:
         self._ensure_open()

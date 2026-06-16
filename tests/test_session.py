@@ -556,7 +556,23 @@ def test_session_revalidation_uses_original_deadline_and_retains_previous_value(
         calls += 1
         return calls
 
+    class ManualClock:
+        def __init__(self) -> None:
+            self.wall_time = 1_000.0
+            self.monotonic_time = 100.0
+
+        def now(self) -> float:
+            return self.wall_time
+
+        def monotonic(self) -> float:
+            return self.monotonic_time
+
+        def advance(self, seconds: float) -> None:
+            self.wall_time += seconds
+            self.monotonic_time += seconds
+
     async def scenario():
+        clock = ManualClock()
         builder = SnapshotBuilder(
             [
                 CallableSource(
@@ -568,10 +584,11 @@ def test_session_revalidation_uses_original_deadline_and_retains_previous_value(
                 )
             ],
             retry_policy=RetryPolicy(max_attempts=1),
+            clock=clock,
         )
-        async with builder.session(deadline_seconds=0.02) as session:
+        async with builder.session(deadline_seconds=1.0) as session:
             first = await session.resolve([KEY_A])
-            await asyncio.sleep(0.03)
+            clock.advance(2.0)
             failed = await session.revalidate(
                 [KEY_A],
                 strict=False,

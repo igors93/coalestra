@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+import coalestra.core.isolation as isolation_module
 from coalestra import AsyncMemoryCache, CallableSource, ResourceKey, SnapshotBuilder
 from coalestra.core.errors import SnapshotDeadlineExceededError
 
@@ -32,6 +33,24 @@ async def _wait_until(predicate, *, attempts: int = 400) -> None:
             return
         await asyncio.sleep(0.002)
     raise AssertionError("condition was not reached")
+
+
+def test_copy_health_records_positive_duration_when_timer_does_not_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        isolator = isolation_module.AsyncPayloadIsolator(
+            isolation_module.PayloadIsolator(),
+            run_in_thread=False,
+        )
+        monkeypatch.setattr(isolation_module, "perf_counter_ns", lambda: 123)
+
+        assert await isolator.run(lambda: "copied") == "copied"
+        health = isolator.health_snapshot()
+        assert health.completed_count == 1
+        assert health.max_duration_ms > 0
+
+    asyncio.run(scenario())
 
 
 def test_builder_health_exposes_idle_copy_components() -> None:

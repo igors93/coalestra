@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Used a high-resolution integer timer for payload-copy health durations so completed work is never reported as zero-duration on coarse timer platforms.
+- Replaced a wall-clock-sensitive session deadline regression with a deterministic manual clock.
+
 ## 0.5.8 - 2026-06-15
 
 - Added bounded asynchronous payload-copy execution across cache, source, publisher, derived, and session boundaries.
@@ -9,6 +12,9 @@
 - Added `PayloadCopyHealth` and exposed current copy activity, saturation, cumulative outcomes, timeouts, and latency summaries through `BuilderHealth`.
 - Added component-level copy health for the builder-wide isolator and the default memory cache without adding resource-level cardinality.
 - Added deterministic regressions for copy activity, waiting, failures, deadline timeouts, late worker completion, aggregation, and immutable health snapshots.
+- Added controlled payload-copy shutdown that rejects new work, interrupts capacity waiters, and drains active worker threads within a configurable budget.
+- Added `PayloadCopyShutdownTimeoutError` and `PayloadCopySubsystemClosedError`, plus shutdown state and timeout diagnostics in `PayloadCopyHealth` and `BuilderHealth`.
+- Kept the synchronous event loop alive after a copy-shutdown timeout until late workers finish, preventing callbacks from targeting an already-closed loop.
 
 ## 0.5.7 - 2026-06-15
 

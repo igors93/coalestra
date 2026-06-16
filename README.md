@@ -570,6 +570,19 @@ print(builder_copies.max_duration_ms)
 
 `PayloadCopyHealth` separates current activity from cumulative outcomes. A timed-out caller may later be followed by a completed or failed worker because Python cannot safely terminate a thread that has already started; timeout and completion counters are therefore intentionally not mutually exclusive. Component names are fixed and low-cardinality.
 
+Payload-copy shutdown is controlled by `SnapshotBuilder.copy_shutdown_timeout_seconds` (default `5.0`). Closing a builder stops new copy submissions, interrupts operations waiting for copy capacity, and waits for already-started workers. If they do not drain in time, `PayloadCopyShutdownTimeoutError` reports the active component counts while health retains `shutdown_incomplete`, `shutdown_timeout_count`, and `active_at_last_shutdown_timeout`. A later worker completion automatically transitions that component to `shutdown_complete`.
+
+```python
+builder = SnapshotBuilder(
+    sources,
+    copy_shutdown_timeout_seconds=3.0,
+)
+
+await builder.aclose()
+```
+
+Standalone `AsyncMemoryCache` and `ResourcePublisher` instances close their owned copy runners through `aclose()`. Builder-created publishers share the builder runner and do not close it independently. The synchronous facade defers stopping its event loop after a shutdown timeout until late copy workers have actually finished.
+
 `sync_builder.health_snapshot()` adds `pending_submissions` and `max_pending_submissions` from the synchronous non-blocking publication backlog. Counters are process-local and cumulative since builder creation. The snapshot intentionally exposes aggregates only; it does not include symbols, subjects, qualifiers, or business decisions.
 
 ## Architectural boundary

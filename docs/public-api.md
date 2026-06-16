@@ -16,6 +16,7 @@ builder = SnapshotBuilder(
     max_pending_tasks=12,
     source_concurrency={"rest": 4},
     source_resilience={"rest": rest_policy},
+    copy_shutdown_timeout_seconds=5.0,
 )
 
 snapshot = await builder.build(
@@ -265,6 +266,8 @@ Additional event types include:
 - `CircuitOpenError`
 - `DependencyCycleError`
 - `DependencyResolutionError`
+- `PayloadCopySubsystemClosedError`
+- `PayloadCopyShutdownTimeoutError`
 - `PayloadIsolationError`
 - `ResourceResolutionError`
 - `SnapshotBuildError`
@@ -432,6 +435,10 @@ Standalone `ResourcePublisher` instances accept the same two options. Builder-cr
 
 `SnapshotBuilder` accepts `cache_run_payload_copies_in_thread` and `cache_max_copy_concurrency` for the default `AsyncMemoryCache`. These settings are rejected when a custom cache is supplied so configuration cannot appear to succeed while being ignored.
 
+`SnapshotBuilder.copy_shutdown_timeout_seconds` sets the default budget for draining builder-owned and default-cache copy workers. `await builder.aclose(copy_shutdown_timeout_seconds=...)` can override it for one shutdown. New work is rejected with `PayloadCopySubsystemClosedError` after shutdown starts. If active workers remain after the budget, `PayloadCopyShutdownTimeoutError` exposes `timeout_seconds`, `active_components`, and the aggregate `active_copies` count.
+
+`AsyncMemoryCache.aclose_payload_copies()` and `AsyncMemoryCache.aclose()` drain the cache-owned runner. A standalone `ResourcePublisher.aclose()` drains its runner; publishers created by `SnapshotBuilder` share the builder runner and therefore do not own its lifecycle.
+
 ### `ObservationPolicy`
 
 Controls tolerance and rejection of source or published timestamps that are ahead of the local clock.
@@ -449,6 +456,9 @@ Returned by `await builder.health_snapshot()` and `sync_builder.health_snapshot(
 - `revalidation_failure_count`: revalidations that retained the previous session state;
 - `pending_submissions`: accepted non-blocking synchronous submissions not yet complete;
 - `max_pending_submissions`: synchronous backlog limit, or `None` on the asynchronous builder.
+- `payload_copy_shutdown_incomplete`: whether any copy component most recently exceeded its shutdown budget and has not yet drained;
+- `payload_copy_shutdown_timeout_count`: cumulative component shutdown timeouts;
+- `payload_copy_active_at_last_shutdown_timeout`: aggregate active workers recorded at the latest component timeouts.
 
 Current-state fields are point-in-time observations. Counter fields are process-local and cumulative since builder creation. `SyncSnapshotBuilder.health_snapshot()` overlays its thread-safe submission backlog state onto the underlying builder health snapshot.
 

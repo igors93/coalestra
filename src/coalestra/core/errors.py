@@ -79,6 +79,36 @@ class PayloadIsolationError(CoalestraError):
         )
 
 
+class PayloadCopySubsystemClosedError(CoalestraError):
+    """Raised when payload-copy work is submitted after shutdown has started."""
+
+    def __init__(self, *, component: str) -> None:
+        self.component = str(component)
+        super().__init__(f"Payload copy subsystem {self.component!r} is closing or closed")
+
+
+class PayloadCopyShutdownTimeoutError(CoalestraError):
+    """Raised when payload-copy workers do not drain within the shutdown budget."""
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float,
+        active_components: Mapping[str, int],
+    ) -> None:
+        self.timeout_seconds = float(timeout_seconds)
+        self.active_components = dict(active_components)
+        self.active_copies = sum(max(0, int(value)) for value in self.active_components.values())
+        rendered = (
+            ", ".join(f"{name}={count}" for name, count in sorted(self.active_components.items()))
+            or "none"
+        )
+        super().__init__(
+            "Payload copy workers did not drain within "
+            f"{self.timeout_seconds:.3f}s (active: {rendered})"
+        )
+
+
 class SourceProtocolError(CoalestraError):
     """Raised when a source violates one of Coalestra's source contracts."""
 

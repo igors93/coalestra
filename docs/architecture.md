@@ -293,6 +293,10 @@ sync submission backlog -----+
 
 A caller timeout does not imply that the underlying worker stopped. The health model therefore permits one operation to increment `timeout_count` and later increment either `completed_count` or `failure_count`. This distinction makes leaked capacity and slow late completions visible without weakening the concurrency limit.
 
+Copy runners also have an explicit lifecycle. Shutdown atomically rejects new copies, cancels semaphore waiters before they can start, and waits for tracked worker tasks within one configured budget. A timeout raises `PayloadCopyShutdownTimeoutError` with component-level active counts; the worker remains tracked until the underlying thread finishes because Python cannot terminate it safely. Health exposes both the historical timeout and the current completion state.
+
+The builder closes its shared runner and its owned default-cache runner concurrently so the configured timeout is a total budget rather than a separate full timeout per component. Standalone caches and publishers close only runners they own. After a synchronous shutdown timeout, the facade keeps its private event loop alive until late copy workers drain, then stops the loop automatically.
+
 The health model remains operational rather than prescriptive. Coalestra reports saturation and failures; the consuming application decides whether to alert, degrade, pause work, or continue. No resource subjects or qualifier values are added to health fields.
 
 ## Synchronous submission backlog

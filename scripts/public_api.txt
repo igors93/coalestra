@@ -54,6 +54,8 @@ ObservationPolicy
 PRESERVE_KEY_NORMALIZER
 PayloadCopier
 PayloadCopyHealth
+PayloadCopyShutdownTimeoutError
+PayloadCopySubsystemClosedError
 PayloadIsolationError
 PayloadIsolator
 PolicyResolver
