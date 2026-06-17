@@ -12,7 +12,7 @@ def test_capabilities_publish_stable_v060_contract() -> None:
     installed = coalestra.capabilities()
     payload = installed.to_dict()
 
-    assert installed.package_version == "0.6.0"
+    assert installed.package_version == "0.6.1"
     assert installed.api_stability == "0.6"
     assert installed.stability == "beta"
     assert installed.supports("snapshot_acceptance")
