@@ -145,7 +145,7 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 
 def capabilities() -> CoalestraCapabilities:
