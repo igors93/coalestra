@@ -51,6 +51,8 @@ class ResolutionRuntime:
     memo: dict[ResourceKey, SnapshotValue[Any]] = field(default_factory=dict)
     cache_stale_results: bool = True
     force_refresh_keys: set[ResourceKey] = field(default_factory=set)
+    excluded_sources: dict[ResourceKey, set[str]] = field(default_factory=dict)
+    cache_source_results: bool = True
 
     def requires_refresh(self, key: ResourceKey) -> bool:
         """Return whether ``key`` must bypass pinned and cached values."""
@@ -61,3 +63,21 @@ class ResolutionRuntime:
         """Allow later dependency reads to reuse a successfully refreshed value."""
 
         self.force_refresh_keys.discard(key)
+
+    def exclude_source(self, key: ResourceKey, source: str) -> None:
+        """Exclude one source for one resource during the current resolution attempt."""
+
+        normalized = str(source or "").strip()
+        if not normalized:
+            raise ValueError("excluded source name cannot be empty")
+        self.excluded_sources.setdefault(key, set()).add(normalized)
+
+    def source_is_excluded(self, key: ResourceKey, source: str) -> bool:
+        """Return whether ``source`` is excluded for ``key`` in this runtime."""
+
+        return str(source) in self.excluded_sources.get(key, set())
+
+    def copied_exclusions(self) -> dict[ResourceKey, set[str]]:
+        """Return a detached copy of per-resource source exclusions."""
+
+        return {key: set(sources) for key, sources in self.excluded_sources.items()}

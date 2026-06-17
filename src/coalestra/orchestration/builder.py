@@ -1098,6 +1098,19 @@ class SnapshotBuilder:
 
             candidates: list[ResourceKey] = []
             for key in unresolved:
+                if runtime.source_is_excluded(key, source.name):
+                    self.metrics.increment(
+                        "source_fetch_total",
+                        status="consistency_excluded",
+                        source=source.name,
+                    )
+                    self.events.emit(
+                        "source_excluded",
+                        resource=str(key),
+                        source=source.name,
+                        reason="consistency_fallback",
+                    )
+                    continue
                 try:
                     supported = self._source_catalog.supports(source, key, runtime.diagnostics)
                 except Exception as error:
@@ -1209,7 +1222,7 @@ class SnapshotBuilder:
                     authority_rank=value.authority_rank,
                 )
 
-            if fresh_values:
+            if fresh_values and runtime.cache_source_results:
                 write_results = await self._cache_access.set_many(
                     fresh_values,
                     diagnostics=runtime.diagnostics,

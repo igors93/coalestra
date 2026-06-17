@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from coalestra.core.acceptance import (
     SnapshotAcceptancePolicy,
@@ -21,6 +21,7 @@ from coalestra.core.errors import (
     SnapshotBuildError,
     SnapshotConsistencyError,
     SnapshotDeadlineExceededError,
+    SourceFailure,
 )
 from coalestra.core.models import FetchContext, ResourceKey, Snapshot, SnapshotValue
 from coalestra.core.request import SnapshotRequest
@@ -121,7 +122,7 @@ class SnapshotSession:
                 )
             except SnapshotDeadlineExceededError as error:
                 self._record_copy_deadline(phase="session_resolve")
-                deadline_errors = dict.fromkeys(requested, error)
+                deadline_errors = self._deadline_resolution_errors(requested, error)
                 self._record_resolve(
                     requested=requested,
                     requested_errors=deadline_errors,
@@ -132,7 +133,10 @@ class SnapshotSession:
                 if strict:
                     raise SnapshotBuildError(deadline_errors) from error
                 self._resources = candidate_resources
-                self._errors = {**candidate_errors, **dict.fromkeys(pending, error)}
+                self._errors = {
+                    **candidate_errors,
+                    **self._deadline_resolution_errors(tuple(pending), error),
+                }
                 return await self._snapshot_state_async(
                     self._resources,
                     self._errors,
@@ -296,6 +300,28 @@ class SnapshotSession:
                     requested,
                     consistency_policy,
                 )
+                if violation is not None and force_refresh:
+                    try:
+                        values, staging_runtime, violation = await self._retry_inconsistent_sources(
+                            values=values,
+                            requested=requested,
+                            targets=targets,
+                            runtime=staging_runtime,
+                            policy=consistency_policy,
+                            initial_violation=violation,
+                        )
+                    except SnapshotDeadlineExceededError as error:
+                        self._record_copy_deadline(phase="session_consistency_fallback")
+                        self._record_revalidation(
+                            requested=requested,
+                            affected=affected,
+                            errors=dict.fromkeys(requested, error),
+                            committed=False,
+                            refreshed=0,
+                            strict=strict,
+                            force_refresh=force_refresh,
+                        )
+                        raise SnapshotBuildError(dict.fromkeys(requested, error)) from error
                 if violation is not None:
                     self._record_revalidation(
                         requested=requested,
@@ -426,17 +452,143 @@ class SnapshotSession:
         self,
         requested: tuple[ResourceKey, ...],
     ) -> frozenset[ResourceKey]:
+        return self._affected_keys_from_memo(requested, self._runtime.memo)
+
+    @staticmethod
+    def _affected_keys_from_memo(
+        requested: tuple[ResourceKey, ...],
+        memo: Mapping[ResourceKey, SnapshotValue[Any]],
+    ) -> frozenset[ResourceKey]:
         affected = set(requested)
         changed = True
         while changed:
             changed = False
-            for key, value in self._runtime.memo.items():
+            for key, value in memo.items():
                 if key in affected:
                     continue
                 if any(dependency in affected for dependency in value.dependency_versions):
                     affected.add(key)
                     changed = True
         return frozenset(affected)
+
+    async def _retry_inconsistent_sources(
+        self,
+        *,
+        values: dict[ResourceKey, SnapshotValue[Any]],
+        requested: tuple[ResourceKey, ...],
+        targets: tuple[ResourceKey, ...],
+        runtime: ResolutionRuntime,
+        policy: SnapshotConsistencyPolicy,
+        initial_violation: ObservationSkewViolation,
+    ) -> tuple[
+        dict[ResourceKey, SnapshotValue[Any]],
+        ResolutionRuntime,
+        ObservationSkewViolation | None,
+    ]:
+        """Retry older resources through lower-priority sources after skew failure.
+
+        A force-refresh can still select a high-priority source whose value is fresh according to
+        the resource TTL but too old for the request's consistency window. In that case the source
+        is excluded only for the offending resource and the next available source is attempted.
+        Fallback values are deliberately not written to the shared cache, so a lower-authority
+        value can satisfy this snapshot without replacing the cache's authoritative value.
+        """
+
+        violation: ObservationSkewViolation | None = initial_violation
+        attempted: set[tuple[ResourceKey, str]] = set()
+        candidate_values = dict(values)
+        candidate_runtime = runtime
+
+        while violation is not None:
+            oldest_value = candidate_values.get(violation.oldest_key)
+            if oldest_value is None:
+                break
+            excluded_source = str(oldest_value.source or "").strip()
+            attempt_identity = (violation.oldest_key, excluded_source)
+            if not excluded_source or attempt_identity in attempted:
+                break
+            attempted.add(attempt_identity)
+
+            retry_affected = self._affected_keys_from_memo(
+                (violation.oldest_key,),
+                candidate_runtime.memo,
+            )
+            retry_targets = tuple(key for key in targets if key in retry_affected)
+            if violation.oldest_key not in retry_targets:
+                retry_targets = (violation.oldest_key, *retry_targets)
+
+            retry_runtime = ResolutionRuntime(
+                diagnostics=candidate_runtime.diagnostics,
+                memo={
+                    key: value
+                    for key, value in candidate_runtime.memo.items()
+                    if key not in retry_affected
+                },
+                cache_stale_results=False,
+                force_refresh_keys=set(retry_affected),
+                excluded_sources=candidate_runtime.copied_exclusions(),
+                cache_source_results=False,
+            )
+            retry_runtime.exclude_source(violation.oldest_key, excluded_source)
+
+            self._builder.metrics.increment(
+                "snapshot_consistency_fallback_total",
+                status="attempt",
+            )
+            self._builder.events.emit(
+                "snapshot_consistency_fallback_started",
+                snapshot_id=self.snapshot_id,
+                resource=str(violation.oldest_key),
+                excluded_source=excluded_source,
+                observation_skew_ms=violation.observation_skew_seconds * 1000.0,
+                max_observation_skew_ms=violation.max_observation_skew_seconds * 1000.0,
+            )
+
+            retry_values, retry_errors = await self._builder._resolve_many(
+                retry_targets,
+                context=self._context,
+                runtime=retry_runtime,
+            )
+            replacement = retry_values.get(violation.oldest_key)
+            if retry_errors or replacement is None:
+                self._builder.metrics.increment(
+                    "snapshot_consistency_fallback_total",
+                    status="exhausted",
+                )
+                self._builder.events.emit(
+                    "snapshot_consistency_fallback_exhausted",
+                    snapshot_id=self.snapshot_id,
+                    resource=str(violation.oldest_key),
+                    excluded_source=excluded_source,
+                    failed_resources=len(retry_errors),
+                )
+                break
+
+            candidate_values.update(retry_values)
+            candidate_runtime = retry_runtime
+            next_violation = find_observation_skew_violation(
+                candidate_values,
+                requested,
+                policy,
+            )
+            if next_violation is None:
+                self._builder.metrics.increment(
+                    "snapshot_consistency_fallback_total",
+                    status="success",
+                )
+                self._builder.events.emit(
+                    "snapshot_consistency_fallback_succeeded",
+                    snapshot_id=self.snapshot_id,
+                    resource=str(violation.oldest_key),
+                    excluded_source=excluded_source,
+                    replacement_source=replacement.source,
+                    replacement_observed_at=replacement.observed_at,
+                )
+                return candidate_values, candidate_runtime, None
+
+            violation = next_violation
+
+        return candidate_values, candidate_runtime, violation
 
     def _snapshot_with_errors(
         self,
@@ -506,6 +658,19 @@ class SnapshotSession:
             errors=errors,
             diagnostics=diagnostics,
         )
+
+    @staticmethod
+    def _deadline_resolution_errors(
+        keys: tuple[ResourceKey, ...],
+        error: SnapshotDeadlineExceededError,
+    ) -> dict[ResourceKey, ResourceResolutionError]:
+        failure = SourceFailure(
+            source="snapshot",
+            error_type=type(error).__name__,
+            message=str(error),
+            attempts=1,
+        )
+        return {key: ResourceResolutionError(key, (failure,)) for key in keys}
 
     @staticmethod
     def _errors_include_deadline(

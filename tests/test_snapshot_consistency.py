@@ -7,6 +7,7 @@ import pytest
 from coalestra import (
     ERROR_DIAGNOSTICS_SCHEMA_VERSION,
     CallableBatchSource,
+    CallableSource,
     FreshnessPolicy,
     InMemoryMetrics,
     ResourceKey,
@@ -15,6 +16,7 @@ from coalestra import (
     SnapshotConsistencyError,
     SnapshotConsistencyPolicy,
     SnapshotRequest,
+    SourceAuthorityPolicy,
     SourcePayload,
     SyncSnapshotBuilder,
 )
@@ -215,3 +217,95 @@ def test_sync_facade_propagates_consistency_failures() -> None:
 
     with SyncSnapshotBuilder(builder) as sync_builder, pytest.raises(SnapshotConsistencyError):
         sync_builder.build_request(request)
+
+
+def test_force_refresh_retries_older_resource_through_next_source() -> None:
+    observations = {
+        "local": 100.0,
+        "rest_a": 100.5,
+        "rest_b": 100.5,
+    }
+    calls = {"local": 0, "rest_a": 0, "rest_b": 0}
+    metrics = InMemoryMetrics()
+
+    async def fetch_local(_key, _context):
+        calls["local"] += 1
+        return SourcePayload(value="local-a", observed_at=observations["local"])
+
+    async def fetch_rest(keys, _context):
+        payloads = {}
+        for key in keys:
+            if key == KEY_A:
+                calls["rest_a"] += 1
+                payloads[key] = SourcePayload(
+                    value="rest-a",
+                    observed_at=observations["rest_a"],
+                )
+            elif key == KEY_B:
+                calls["rest_b"] += 1
+                payloads[key] = SourcePayload(
+                    value="rest-b",
+                    observed_at=observations["rest_b"],
+                )
+        return payloads
+
+    builder = SnapshotBuilder(
+        [
+            CallableSource(
+                name="local",
+                priority=100,
+                supports=lambda key: key == KEY_A,
+                fetcher=fetch_local,
+            ),
+            CallableBatchSource(
+                name="rest",
+                priority=10,
+                supports=lambda key: key in {KEY_A, KEY_B},
+                fetcher=fetch_rest,
+            ),
+        ],
+        default_policy=FreshnessPolicy(float("inf"), float("inf")),
+        authority_policy=SourceAuthorityPolicy({"local": 300, "rest": 30}),
+        metrics=metrics,
+    )
+
+    async def scenario():
+        async with builder.session() as session:
+            initial = await session.resolve([KEY_A, KEY_B])
+            observations.update(local=200.0, rest_a=206.0, rest_b=206.0)
+            refreshed = await session.revalidate(
+                [KEY_A, KEY_B],
+                force_refresh=True,
+                consistency_policy=SnapshotConsistencyPolicy(5.0),
+            )
+            cache_lookup = await builder.cache.get(
+                KEY_A,
+                now=builder.clock.now(),
+                policy=FreshnessPolicy(float("inf"), float("inf")),
+            )
+            return initial, refreshed, cache_lookup
+
+    initial, refreshed, cache_lookup = asyncio.run(scenario())
+
+    assert initial[KEY_A].source == "local"
+    assert refreshed[KEY_A].source == "rest"
+    assert refreshed[KEY_A].observed_at == 206.0
+    assert refreshed[KEY_B].observed_at == 206.0
+    assert calls == {"local": 2, "rest_a": 1, "rest_b": 2}
+    assert cache_lookup.value is not None
+    assert cache_lookup.value.source == "local"
+    assert cache_lookup.value.authority_rank == 300
+    assert (
+        metrics.counter(
+            "snapshot_consistency_fallback_total",
+            status="attempt",
+        )
+        == 1
+    )
+    assert (
+        metrics.counter(
+            "snapshot_consistency_fallback_total",
+            status="success",
+        )
+        == 1
+    )
