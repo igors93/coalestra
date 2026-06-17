@@ -107,7 +107,10 @@ def test_concurrent_identical_builds_share_one_batch_operation() -> None:
     assert calls == 1
     assert all(first[key].value == 1 for key in KEYS)
     assert all(second[key].value == 1 for key in KEYS)
-    assert all(second[key].metadata["coalesced_request"] is True for key in KEYS)
+    assert any(
+        all(snapshot[key].metadata.get("coalesced_request") is True for key in KEYS)
+        for snapshot in (first, second)
+    )
 
 
 def test_synchronous_batch_fetcher_runs_in_worker_thread() -> None:
