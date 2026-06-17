@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-06-17
+
+- Fixed a flaky test assertion that incorrectly assumed the second concurrent build is always the singleflight joiner.
+
 ## 0.6.0 - 2026-06-16
 
 - Established a versioned runtime capability contract through `capabilities()` and `require_capabilities()` for startup compatibility checks.
