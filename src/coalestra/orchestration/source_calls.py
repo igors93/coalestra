@@ -72,6 +72,7 @@ class SourceCalls:
         source_timeout_guarantees: Mapping[str, SourceTimeoutGuarantee],
         health_tracker: OperationalHealthTracker,
         transport_timeout_grace_seconds: float,
+        deadline_dispatch_grace_seconds: float = 0.0,
     ) -> None:
         self.clock = clock
         self.capacity = capacity
@@ -86,6 +87,7 @@ class SourceCalls:
         self.source_timeout_guarantees = dict(source_timeout_guarantees)
         self.health_tracker = health_tracker
         self.transport_timeout_grace_seconds = float(transport_timeout_grace_seconds)
+        self.deadline_dispatch_grace_seconds = float(deadline_dispatch_grace_seconds)
 
     async def fetch_once(
         self,
@@ -357,10 +359,35 @@ class SourceCalls:
             or guarantee.status is not SourceTimeoutGuaranteeStatus.PROTECTED
             or guarantee.transport_timeout_seconds is None
             or budget.seconds is None
-            or guarantee.transport_timeout_seconds < budget.seconds
         ):
             return
 
+        transport = guarantee.transport_timeout_seconds
+
+        # Budget comfortably covers the declared transport timeout — nothing to do.
+        if transport < budget.seconds:
+            return
+
+        # Budget is within the deadline dispatch grace window: allow the call but emit a
+        # pressure event so operators can detect when configuration margins are tight.
+        # Grace only applies when the budget is limited by the session deadline, not when
+        # source.timeout_seconds itself is misconfigured to be smaller than transport_timeout.
+        if (
+            budget.limited_by_deadline
+            and transport < budget.seconds + self.deadline_dispatch_grace_seconds
+        ):
+            self.events.emit(
+                "source_dispatch_under_deadline_pressure",
+                source=source.name,
+                resource=str(resource) if resource is not None else "",
+                transport_timeout_seconds=transport,
+                available_budget_seconds=budget.seconds,
+                deadline_dispatch_grace_seconds=self.deadline_dispatch_grace_seconds,
+                gap_seconds=transport - budget.seconds,
+            )
+            return
+
+        # Budget is too small to safely dispatch — reject before the call starts.
         target = self._target_suffix(resource)
         self.metrics.increment(
             "source_transport_budget_rejection_total",
@@ -371,17 +398,19 @@ class SourceCalls:
             "source_transport_budget_rejected",
             source=source.name,
             resource=str(resource) if resource is not None else "",
-            transport_timeout_seconds=guarantee.transport_timeout_seconds,
+            transport_timeout_seconds=transport,
             available_budget_seconds=budget.seconds,
         )
+        gap = transport - budget.seconds
+        detail = f"budget={budget.seconds:.3f}s, transport_timeout={transport:.3f}s, gap={gap:.3f}s"
         if budget.limited_by_deadline:
             raise SnapshotDeadlineExceededError(
-                "snapshot deadline budget is shorter than the declared transport timeout "
-                f"for source {source.name}{target}"
+                f"snapshot deadline budget is shorter than the declared transport timeout "
+                f"for source {source.name}{target} ({detail})"
             )
         raise SourceTimeoutError(
-            "source timeout budget is not greater than the declared transport timeout "
-            f"for source {source.name}{target}"
+            f"source timeout budget is not greater than the declared transport timeout "
+            f"for source {source.name}{target} ({detail})"
         )
 
     def effective_timeout(

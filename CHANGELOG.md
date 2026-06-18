@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-06-18
+
+- Added `source_deadline_dispatch_grace_seconds` parameter to `SnapshotBuilder` (default `0.0`, fully backward-compatible). When the remaining session deadline budget falls below the declared source transport timeout but is still within the configured grace margin, the call is now allowed to proceed rather than being rejected pre-flight. This prevents spurious `SnapshotDeadlineExceededError` failures in sessions that consume time in an initial resolution phase before reaching the target revalidation step.
+- When a call is dispatched within the grace window, a `source_dispatch_under_deadline_pressure` event is emitted with the actual budget, transport timeout, and gap values for operational observability.
+- Rejection error messages now include `budget`, `transport_timeout`, and `gap` values to aid configuration diagnosis.
+
 ## 0.6.1 - 2026-06-17
 
 - Fixed a flaky test assertion that incorrectly assumed the second concurrent build is always the singleflight joiner.

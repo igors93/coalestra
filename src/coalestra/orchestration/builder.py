@@ -123,6 +123,7 @@ class SnapshotBuilder:
         require_source_timeout_declarations: bool = True,
         allow_unsafe_blocking_sources: bool = False,
         source_transport_timeout_grace_seconds: float = 0.05,
+        source_deadline_dispatch_grace_seconds: float = 0.0,
     ) -> None:
         if authority_policy is not None and authority_resolver is not None:
             raise ValueError("authority_policy and authority_resolver cannot be provided together")
@@ -190,6 +191,14 @@ class SnapshotBuilder:
             raise ValueError("source_transport_timeout_grace_seconds must be finite")
         if source_transport_timeout_grace_seconds < 0:
             raise ValueError("source_transport_timeout_grace_seconds cannot be negative")
+        if isinstance(source_deadline_dispatch_grace_seconds, bool) or not isinstance(
+            source_deadline_dispatch_grace_seconds, (int, float)
+        ):
+            raise TypeError("source_deadline_dispatch_grace_seconds must be a number")
+        if not math.isfinite(float(source_deadline_dispatch_grace_seconds)):
+            raise ValueError("source_deadline_dispatch_grace_seconds must be finite")
+        if source_deadline_dispatch_grace_seconds < 0:
+            raise ValueError("source_deadline_dispatch_grace_seconds cannot be negative")
         if cache is not None and (
             cache_run_payload_copies_in_thread is not None or cache_max_copy_concurrency != 4
         ):
@@ -247,6 +256,7 @@ class SnapshotBuilder:
         self.require_source_timeout_declarations = require_source_timeout_declarations
         self.allow_unsafe_blocking_sources = allow_unsafe_blocking_sources
         self.source_transport_timeout_grace_seconds = float(source_transport_timeout_grace_seconds)
+        self.source_deadline_dispatch_grace_seconds = float(source_deadline_dispatch_grace_seconds)
         self.max_concurrency = int(max_concurrency)
         self.max_pending_tasks = (
             self.max_concurrency if max_pending_tasks is None else int(max_pending_tasks)
@@ -307,6 +317,7 @@ class SnapshotBuilder:
             source_timeout_guarantees=self._source_catalog.timeout_guarantees,
             health_tracker=self._health_tracker,
             transport_timeout_grace_seconds=self.source_transport_timeout_grace_seconds,
+            deadline_dispatch_grace_seconds=self.source_deadline_dispatch_grace_seconds,
         )
         self._source_executor = SourceExecutor(
             source_catalog=self._source_catalog,
