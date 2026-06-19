@@ -21,6 +21,8 @@ _STABLE_FEATURES = (
     "builder_health_assessment",
     "builder_health_serialization",
     "controlled_payload_copy_shutdown",
+    "degraded_snapshot_results",
+    "partitioned_request_builds",
     "payload_copy_health",
     "payload_copy_offload",
     "snapshot_acceptance",

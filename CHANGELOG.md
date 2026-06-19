@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.6.3 - 2026-06-19
+
+- Added non-throwing operational API (`try_resolve_request`, `try_build_request`, `try_build_requests`) with configurable `RequestDegradationPolicy` for partial-snapshot tolerance in multi-symbol workloads.
+- Introduced `SnapshotResult` and `SnapshotResultState` (`ACCEPTED`, `DEGRADED`, `REJECTED`) as the result contract for degraded execution paths.
+- Installed ergonomic method aliases on `SnapshotBuilder`, `SnapshotSession`, `SyncSnapshotBuilder`, and `SyncSnapshotSession` via `install_operational_methods()`.
+- Fixed three mypy `arg-type` errors where `policy.*_actions` (`Iterable[str]`) was passed where `tuple[str, ...]` is required by `SnapshotResult`.
+- Fixed three mypy `no-any-return` errors in the sync wrappers (`_sync_session_try_resolve_request`, `_sync_builder_try_build_request`, `_sync_builder_try_build_requests`) by adding explicit `cast` calls.
+- Fixed mypy `union-attr` error: added an explicit `builder is None` guard before accessing `builder.clock` in `_find_acceptance_violations`.
+- Replaced six `setattr` calls with constant attribute names (ruff B010) with direct class attribute assignments in `install_operational_methods`.
+- Removed unused `Sequence` import from `collections.abc` (ruff F401).
+- Fixed import order in `__init__.py`: `coalestra.operational` now appears before `coalestra.orchestration` (ruff I001).
+- Added 35 regression tests covering `RequestDegradationPolicy`, `SnapshotResult`, `try_resolve_request`, `try_build_request`, `try_build_requests`, sync wrappers, and `install_operational_methods` idempotency.
+
 ## 0.6.2 - 2026-06-18
 
 - Added `source_deadline_dispatch_grace_seconds` parameter to `SnapshotBuilder` (default `0.0`, fully backward-compatible). When the remaining session deadline budget falls below the declared source transport timeout but is still within the configured grace margin, the call is now allowed to proceed rather than being rejected pre-flight. This prevents spurious `SnapshotDeadlineExceededError` failures in sessions that consume time in an initial resolution phase before reaching the target revalidation step.

@@ -123,6 +123,15 @@ from coalestra.observability import (
     NullEventSink,
     NullMetrics,
 )
+from coalestra.operational import (
+    RequestDegradationPolicy,
+    SnapshotResult,
+    SnapshotResultState,
+    install_operational_methods,
+    try_build_request,
+    try_build_requests,
+    try_resolve_request,
+)
 from coalestra.orchestration import (
     PolicyResolver,
     SnapshotBuilder,
@@ -145,7 +154,9 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
+
+install_operational_methods()
 
 
 def capabilities() -> CoalestraCapabilities:
@@ -247,6 +258,7 @@ __all__ = [
     "PublishResult",
     "PublishStatus",
     "RefreshMode",
+    "RequestDegradationPolicy",
     "ResilienceConfiguredSource",
     "ResiliencePolicyResolver",
     "ResourceAcceptanceError",
@@ -273,6 +285,8 @@ __all__ = [
     "SnapshotDiagnostics",
     "SnapshotRequest",
     "SnapshotRequirement",
+    "SnapshotResult",
+    "SnapshotResultState",
     "SnapshotSession",
     "SnapshotSource",
     "SnapshotValue",
@@ -294,5 +308,9 @@ __all__ = [
     "capabilities",
     "deepcopy_payload",
     "inspect_source_timeout_guarantee",
+    "install_operational_methods",
     "require_capabilities",
+    "try_build_request",
+    "try_build_requests",
+    "try_resolve_request",
 ]
