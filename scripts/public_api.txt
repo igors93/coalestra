@@ -78,6 +78,7 @@ PolicyResolver
 PublishResult
 PublishStatus
 RefreshMode
+RequestDegradationPolicy
 ResilienceConfiguredSource
 ResiliencePolicyResolver
 ResourceAcceptanceError
@@ -104,6 +105,8 @@ SnapshotDeadlineExceededError
 SnapshotDiagnostics
 SnapshotRequest
 SnapshotRequirement
+SnapshotResult
+SnapshotResultState
 SnapshotSession
 SnapshotSource
 SnapshotValue
@@ -125,4 +128,8 @@ __version__
 capabilities
 deepcopy_payload
 inspect_source_timeout_guarantee
+install_operational_methods
 require_capabilities
+try_build_request
+try_build_requests
+try_resolve_request
