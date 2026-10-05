@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.6.4 - 2026-10-05
+
+- Reject NaN cache freshness windows and non-finite refresh-ahead settings while preserving intentionally unbounded cache windows.
+- Validate retry and circuit-breaker policy settings before they can cause invalid delays or recovery behavior.
+- Reject non-finite timeout settings in callable sources and custom sources during construction or builder validation.
+- Align installation guidance and the release-contract check with the current package version.
+- Add regression coverage for invalid policy and source timeout settings.
+
 ## 0.6.3 - 2026-06-19
 
 - Added non-throwing operational API (`try_resolve_request`, `try_build_request`, `try_build_requests`) with configurable `RequestDegradationPolicy` for partial-snapshot tolerance in multi-symbol workloads.

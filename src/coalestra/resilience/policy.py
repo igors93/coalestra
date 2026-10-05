@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from math import isfinite
 
 from coalestra.resilience.retry import RetryPolicy
 
@@ -26,8 +27,16 @@ class CircuitBreakerPolicy:
     enabled: bool = True
 
     def __post_init__(self) -> None:
+        if isinstance(self.failure_threshold, bool) or not isinstance(self.failure_threshold, int):
+            raise TypeError("failure_threshold must be an integer")
         if self.failure_threshold < 1:
             raise ValueError("failure_threshold must be at least 1")
+        if isinstance(self.recovery_timeout_seconds, bool) or not isinstance(
+            self.recovery_timeout_seconds, (int, float)
+        ):
+            raise TypeError("recovery_timeout_seconds must be a number")
+        if not isfinite(self.recovery_timeout_seconds):
+            raise ValueError("recovery_timeout_seconds must be finite")
         if self.recovery_timeout_seconds < 0:
             raise ValueError("recovery_timeout_seconds cannot be negative")
 

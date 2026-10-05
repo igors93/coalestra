@@ -35,7 +35,7 @@ It coalesces duplicate requests, batches compatible resources, derives values fr
 ## Installation
 
 ```bash
-python -m pip install coalestra==0.6.0
+python -m pip install coalestra==0.6.4
 ```
 
 For development:
@@ -347,10 +347,12 @@ A batch source receives every unresolved compatible key available at its priorit
 ```python
 from coalestra import CallableBatchSource
 
+
 async def fetch_prices(keys, _context):
     symbols = [key.subject for key in keys]
     response = await remote_api.fetch_prices(symbols)
     return {key: response[key.subject] for key in keys if key.subject in response}
+
 
 price_source = CallableBatchSource(
     name="price-api",

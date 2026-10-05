@@ -11,6 +11,7 @@ from coalestra.core.source_timeout import (
     SourceTimeoutGuarantee,
     SourceTimeoutGuaranteeStatus,
     inspect_source_timeout_guarantee,
+    optional_positive_seconds,
 )
 from coalestra.resilience.circuit_breaker import CircuitBreaker, CircuitIdentity
 from coalestra.resilience.policy import ResiliencePolicyResolver, SourceResiliencePolicy
@@ -157,13 +158,14 @@ class SourceCatalog:
         if not callable(getattr(source, "supports", None)):
             raise TypeError(f"source {source.name} must define supports()")
 
-        timeout_seconds = getattr(source, "timeout_seconds", None)
-        if timeout_seconds is not None and float(timeout_seconds) <= 0:
-            raise ValueError(f"source {source.name} timeout_seconds must be positive")
-
-        queue_timeout_seconds = getattr(source, "queue_timeout_seconds", None)
-        if queue_timeout_seconds is not None and float(queue_timeout_seconds) <= 0:
-            raise ValueError(f"source {source.name} queue_timeout_seconds must be positive")
+        optional_positive_seconds(
+            getattr(source, "timeout_seconds", None),
+            field_name=f"source {source.name} timeout_seconds",
+        )
+        optional_positive_seconds(
+            getattr(source, "queue_timeout_seconds", None),
+            field_name=f"source {source.name} queue_timeout_seconds",
+        )
 
         max_concurrency = getattr(source, "max_concurrency", None)
         if max_concurrency is not None and int(max_concurrency) < 1:

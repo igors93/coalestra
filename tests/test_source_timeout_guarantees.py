@@ -62,6 +62,52 @@ def test_callable_adapters_expose_non_blocking_declarations_by_default() -> None
         assert adapter.transport_timeout_seconds is None
 
 
+@pytest.mark.parametrize("adapter", ["single", "batch", "derived"])
+@pytest.mark.parametrize(
+    "field", ["timeout_seconds", "queue_timeout_seconds", "transport_timeout_seconds"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_callable_adapters_reject_non_finite_timeouts(
+    adapter: str, field: str, value: float
+) -> None:
+    common = {
+        "name": "source",
+        "priority": 1,
+        "supports": lambda _key: True,
+        field: value,
+    }
+    if field == "transport_timeout_seconds":
+        common["blocking_io"] = True
+    with pytest.raises(ValueError, match="must be finite and positive"):
+        if adapter == "single":
+            CallableSource(**common, fetcher=lambda _key, _context: "ok")
+        elif adapter == "batch":
+            CallableBatchSource(**common, fetcher=lambda keys, _context: dict.fromkeys(keys, "ok"))
+        else:
+            CallableDerivedSource(
+                **common,
+                dependencies=lambda _key: (),
+                deriver=lambda _key, _snapshot, _context: "ok",
+            )
+
+
+def test_builder_rejects_non_finite_queue_timeout_on_custom_source() -> None:
+    class CustomSource:
+        name = "custom"
+        priority = 1
+        timeout_seconds = 1.0
+        queue_timeout_seconds = float("nan")
+
+        def supports(self, _key: ResourceKey) -> bool:
+            return True
+
+        async def fetch(self, _key: ResourceKey, _context: Any) -> str:
+            return "ok"
+
+    with pytest.raises(ValueError, match="queue_timeout_seconds must be finite and positive"):
+        SnapshotBuilder([CustomSource()])
+
+
 def test_builder_rejects_blocking_source_without_transport_timeout() -> None:
     source = CallableSource(
         name="blocking",

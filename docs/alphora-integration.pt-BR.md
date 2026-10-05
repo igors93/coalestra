@@ -34,8 +34,8 @@ require_capabilities(
 Fontes locais, derivadas e leituras de cache devem declarar:
 
 ```python
-blocking_io=False
-run_sync_in_thread=False
+blocking_io = False
+run_sync_in_thread = False
 ```
 
 Fontes REST devem declarar o timeout realmente aplicado pelo cliente:

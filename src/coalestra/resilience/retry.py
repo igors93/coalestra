@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -19,8 +20,16 @@ class RetryPolicy:
     jitter_ratio: float = 0.1
 
     def __post_init__(self) -> None:
+        if isinstance(self.max_attempts, bool) or not isinstance(self.max_attempts, int):
+            raise TypeError("max_attempts must be an integer")
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        for name in ("base_delay_seconds", "max_delay_seconds", "jitter_ratio"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
         if self.base_delay_seconds < 0 or self.max_delay_seconds < 0:
             raise ValueError("retry delays cannot be negative")
         if self.max_delay_seconds < self.base_delay_seconds:

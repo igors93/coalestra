@@ -154,7 +154,7 @@ from coalestra.sync import (
     SyncSnapshotSession,
 )
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 install_operational_methods()
 

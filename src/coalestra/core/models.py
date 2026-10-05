@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from math import isfinite
+from math import isfinite, isnan
 from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 from uuid import uuid4
@@ -47,6 +47,18 @@ class FreshnessPolicy:
     refresh_ahead_seconds: float = 0.0
 
     def __post_init__(self) -> None:
+        for name in ("ttl_seconds", "max_stale_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if isnan(value):
+                raise ValueError(f"{name} cannot be NaN")
+        if isinstance(self.refresh_ahead_seconds, bool) or not isinstance(
+            self.refresh_ahead_seconds, (int, float)
+        ):
+            raise TypeError("refresh_ahead_seconds must be a number")
+        if not isfinite(self.refresh_ahead_seconds):
+            raise ValueError("refresh_ahead_seconds must be finite")
         if self.ttl_seconds < 0:
             raise ValueError("ttl_seconds cannot be negative")
         if self.max_stale_seconds < self.ttl_seconds:

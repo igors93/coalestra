@@ -7,6 +7,7 @@ from typing import Any
 
 from coalestra.core.errors import SourceProtocolError
 from coalestra.core.models import FetchContext, ResourceKey, SourcePayload
+from coalestra.core.source_timeout import optional_positive_seconds
 from coalestra.resilience.policy import SourceResiliencePolicy
 
 BatchSupportsFunction = Callable[[ResourceKey], bool]
@@ -45,11 +46,10 @@ class CallableBatchSource:
         if not normalized_name:
             raise ValueError("source name cannot be empty")
 
-        if timeout_seconds is not None and timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-
-        if queue_timeout_seconds is not None and queue_timeout_seconds <= 0:
-            raise ValueError("queue_timeout_seconds must be positive")
+        timeout_seconds = optional_positive_seconds(timeout_seconds, field_name="timeout_seconds")
+        queue_timeout_seconds = optional_positive_seconds(
+            queue_timeout_seconds, field_name="queue_timeout_seconds"
+        )
 
         if max_concurrency is not None and max_concurrency < 1:
             raise ValueError("max_concurrency must be at least 1 or None")
@@ -63,13 +63,9 @@ class CallableBatchSource:
         if not isinstance(blocking_io, bool):
             raise TypeError("blocking_io must be a boolean")
 
-        if transport_timeout_seconds is not None:
-            if isinstance(transport_timeout_seconds, bool) or not isinstance(
-                transport_timeout_seconds, (int, float)
-            ):
-                raise TypeError("transport_timeout_seconds must be a number or None")
-            if transport_timeout_seconds <= 0:
-                raise ValueError("transport_timeout_seconds must be positive")
+        transport_timeout_seconds = optional_positive_seconds(
+            transport_timeout_seconds, field_name="transport_timeout_seconds"
+        )
 
         if not blocking_io and transport_timeout_seconds is not None:
             raise ValueError("transport_timeout_seconds requires blocking_io=True")

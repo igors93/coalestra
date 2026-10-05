@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+from importlib.metadata import version
 from pathlib import Path
 
 import coalestra
@@ -28,14 +29,15 @@ _REQUIRED_SCHEMAS = {
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify the Coalestra 0.6 release contract.")
-    parser.add_argument("--expected-version", default="0.6.0")
+    parser.add_argument("--expected-version", default=None)
     parser.add_argument("--forbid-path", type=Path, default=None)
     args = parser.parse_args()
 
-    if coalestra.__version__ != args.expected_version:
+    expected_version = args.expected_version or version("coalestra")
+    if coalestra.__version__ != expected_version:
         raise SystemExit(
             f"ERROR: installed version {coalestra.__version__!r} does not match "
-            f"{args.expected_version!r}"
+            f"{expected_version!r}"
         )
 
     if args.forbid_path is not None:

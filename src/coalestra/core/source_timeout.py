@@ -55,7 +55,7 @@ def inspect_source_timeout_guarantee(source: Any) -> SourceTimeoutGuarantee:
 
     name = str(getattr(source, "name", type(source).__name__))
     declaration_present = hasattr(source, "blocking_io")
-    source_timeout = _optional_positive_number(
+    source_timeout = optional_positive_seconds(
         getattr(source, "timeout_seconds", None),
         field_name=f"source {name} timeout_seconds",
     )
@@ -80,7 +80,7 @@ def inspect_source_timeout_guarantee(source: Any) -> SourceTimeoutGuarantee:
         raise TypeError(f"source {name} blocking_io_offloaded must be a boolean")
     offloaded = bool(offloaded_raw)
 
-    transport_timeout = _optional_positive_number(
+    transport_timeout = optional_positive_seconds(
         getattr(source, "transport_timeout_seconds", None),
         field_name=f"source {name} transport_timeout_seconds",
     )
@@ -118,7 +118,7 @@ def inspect_source_timeout_guarantee(source: Any) -> SourceTimeoutGuarantee:
     )
 
 
-def _optional_positive_number(value: Any, *, field_name: str) -> float | None:
+def optional_positive_seconds(value: Any, *, field_name: str) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
